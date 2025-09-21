@@ -16,7 +16,7 @@ FOOTER_TEXT = os.getenv(
 
 # At the very bottom when running:
 if __name__ == "__main__":
-    token = os.getenv("DISCORD_TOKEN") or "PASTE_YOUR_TOKEN_HERE_FOR_LOCAL_ONLY"
+    token = os.getenv("DISCORD_TOKEN") or "MTQxOTA1MDE1MzYzMjk4OTIxNA.Ges_5j.-ZJvcCMIV54sNxJbrYE4loyOyEPsiWJ2OugS7o"
     bot.run(token)
 
 import discord
@@ -168,3 +168,4 @@ if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN") or "MTQxOTA1MDE1MzYzMjk4OTIxNA.Ges_5j.-ZJvcCMIV54sNxJbrYE4loyOyEPsiWJ2OugS7o"
 
     bot.run(token)
+
