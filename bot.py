@@ -1,5 +1,24 @@
 import csv
 import os
+
+# Read from env with sensible defaults
+CSV_PATH = os.getenv("RESULTS_PATH", "results.csv")
+
+# Put your real IDs in Railway’s variables later (keep defaults for local)
+LEAD_SUPERVISOR_ROLE_ID = int(os.getenv("LEAD_SUPERVISOR_ROLE_ID", "1351333124965142600"))
+GUILD_ID = int(os.getenv("GUILD_ID", "123456789012345678"))
+
+# Footer text you wanted
+FOOTER_TEXT = os.getenv(
+    "FOOTER_TEXT",
+    "More questions or concerns? Please open a ticket inside the New England Transit Discord Server."
+)
+
+# At the very bottom when running:
+if __name__ == "__main__":
+    token = os.getenv("DISCORD_TOKEN") or "PASTE_YOUR_TOKEN_HERE_FOR_LOCAL_ONLY"
+    bot.run(token)
+
 import discord
 from typing import Literal
 from discord import app_commands
@@ -147,4 +166,5 @@ async def reloadcsv_cmd(interaction: discord.Interaction):
 
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN") or "MTQxOTA1MDE1MzYzMjk4OTIxNA.Ges_5j.-ZJvcCMIV54sNxJbrYE4loyOyEPsiWJ2OugS7o"
+
     bot.run(token)
