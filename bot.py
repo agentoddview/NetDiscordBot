@@ -1,7 +1,7 @@
 import csv
 import os
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import discord
@@ -23,7 +23,7 @@ RUNS_NOTIFIED_ROLE_ID = 1332862724039774289     # @Runs Notified (or "run notifi
 
 # If :net: is a custom emoji, set the full tag like "<:net:123456789012345678>"
 # If it's a standard Unicode emoji, you can put the emoji itself here.
-NET_EMOJI = "<:net:1323882053858492437>"         # <-- update to your actual :net: emoji
+NET_EMOJI = "🧠"  # <-- REPLACE with your :net: (e.g., "<:net:123456789012345678>")
 DEFAULT_TZ = "America/New_York"                 # MBTA/WRTA locale
 
 # ---------- Footer text ----------
@@ -78,17 +78,79 @@ def has_lead_supervisor_role(member: discord.Member) -> bool:
 
 
 # ---------- Time helpers for /shift ----------
+def _fmt_date(dt: datetime) -> str:
+    # Example: Thursday September 25, 2025  (Windows safe)
+    try:
+        return dt.strftime("%A %B %-d, %Y")
+    except ValueError:
+        return dt.strftime("%A %B %#d, %Y")
+
+def _fmt_time(dt: datetime) -> str:
+    # Example: 4:00 PM  (Windows safe)
+    try:
+        return dt.strftime("%-I:%M %p")
+    except ValueError:
+        return dt.strftime("%#I:%M %p")
+
+def _ts(dt: datetime, style: str = "R") -> str:
+    return f"<t:{int(dt.timestamp())}:{style}>"
+
 def parse_time_to_dt(time_str: str, tz_name: str = DEFAULT_TZ) -> datetime:
     """
-    Accepts a few friendly formats and returns a timezone-aware datetime.
-    Examples:
-      - 2025-09-23 16:00
-      - 2025/09/23 4:00 PM
-      - Tue 9/23/2025 16:00
-      - 9/23 4:00 PM        (assumes current year)
+    Accepts friendly inputs and returns a tz-aware datetime in tz_name.
+    Supported examples:
+      - "2025-09-23 16:00"
+      - "2025/09/23 4:00 PM"
+      - "Tue 9/23/2025 16:00"
+      - "9/23 4:00 PM"           (assumes current year)
+      - "today 4:00 PM"
+      - "tomorrow 16:00"
+      - "4:00 PM"                (assumes today, else tomorrow if already passed)
     """
     tz = ZoneInfo(tz_name)
     now = datetime.now(tz)
+    s = time_str.strip().lower()
+
+    # Keywords today/tomorrow + time
+    if s.startswith("today ") or s == "today":
+        t = s.replace("today", "").strip()
+        if not t:
+            raise ValueError("Please include a time, e.g., 'today 4:00 PM'.")
+        for p in ["%I:%M %p", "%H:%M"]:
+            try:
+                t_naive = datetime.strptime(t, p)
+                dt = datetime(now.year, now.month, now.day, t_naive.hour, t_naive.minute, tzinfo=tz)
+                return dt
+            except ValueError:
+                pass
+        raise ValueError(f"Could not parse time in '{time_str}'. Try 'today 4:00 PM'.")
+
+    if s.startswith("tomorrow ") or s == "tomorrow":
+        t = s.replace("tomorrow", "").strip()
+        if not t:
+            raise ValueError("Please include a time, e.g., 'tomorrow 16:00'.")
+        for p in ["%I:%M %p", "%H:%M"]:
+            try:
+                t_naive = datetime.strptime(t, p)
+                next_day = now + timedelta(days=1)
+                dt = datetime(next_day.year, next_day.month, next_day.day, t_naive.hour, t_naive.minute, tzinfo=tz)
+                return dt
+            except ValueError:
+                pass
+        raise ValueError(f"Could not parse time in '{time_str}'. Try 'tomorrow 4:00 PM'.")
+
+    # Time-only → today or tomorrow if already passed
+    for p in ["%I:%M %p", "%H:%M"]:
+        try:
+            t_naive = datetime.strptime(s, p)
+            dt = datetime(now.year, now.month, now.day, t_naive.hour, t_naive.minute, tzinfo=tz)
+            if dt <= now:
+                dt = dt + timedelta(days=1)
+            return dt
+        except ValueError:
+            pass
+
+    # Full/partial date patterns
     patterns = [
         "%Y-%m-%d %H:%M",
         "%Y/%m/%d %H:%M",
@@ -109,36 +171,17 @@ def parse_time_to_dt(time_str: str, tz_name: str = DEFAULT_TZ) -> datetime:
             return dt_naive.replace(tzinfo=tz)
         except ValueError as e:
             last_err = e
+
     raise ValueError(
-        f"Could not parse time '{time_str}'. Try formats like '2025-09-23 16:00' or '9/23 4:00 PM'. Last error: {last_err}"
+        f"Could not parse time '{time_str}'. Try '4:00 PM', 'today 4:00 PM', 'tomorrow 16:00', or '9/23 4:00 PM'. Last error: {last_err}"
     )
-
-def discord_abs_date(dt: datetime) -> str:
-    # Example: Tuesday September 23, 2025
-    # Note: %-d works on Linux; on Windows, use %#d
-    try:
-        return dt.strftime("%A %B %-d, %Y")
-    except ValueError:
-        return dt.strftime("%A %B %#d, %Y")
-
-def discord_abs_time(dt: datetime) -> str:
-    # Example: 4:00 PM
-    try:
-        return dt.strftime("%-I:%M %p")
-    except ValueError:
-        return dt.strftime("%#I:%M %p")
-
-def discord_ts(dt: datetime, style: str = "R") -> str:
-    # <t:epoch:R> for relative; use :F for full, :D for date, :T for time
-    epoch = int(dt.timestamp())
-    return f"<t:{epoch}:{style}>"
 
 
 # ---------- Bot ----------
 intents = discord.Intents.default()
-intents.members = True          # resolve member -> roles
+intents.members = True
 intents.guilds = True
-intents.reactions = True        # track :net: reactions
+intents.reactions = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
@@ -151,7 +194,6 @@ SHIFT_TRACK: dict[int, dict] = {}
 async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
-        # Clear globals to avoid duplicates and sync guild-specific commands
         tree.clear_commands(guild=None)
         await tree.sync(guild=None)
         synced = await tree.sync(guild=guild)
@@ -246,6 +288,7 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
 
     when: datetime = info["when"]
     channel = bot.get_channel(info["channel_id"])
+    host_id = info.get("host_id")
     if not isinstance(channel, discord.TextChannel):
         return
 
@@ -256,29 +299,46 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
 
     # Build attendee list
     reactors = info.get("reactors", set())
-    if not reactors:
-        attendee_line = "| |"
-    else:
-        mentions = " ".join(f"<@{uid}>" for uid in reactors)
-        attendee_line = f"| {mentions} |"
+    attendee_line = "| |" if not reactors else f"| {' '.join(f'<@{uid}>' for uid in reactors)} |"
 
-    followup_lines = [
-        "**RUN**",
-        "Please use THIS (https://www.netransit.net/shift) link to join, Console use /joinshift in the game hub. "
-        "If you have any problems joining ping me in ⁠main-chatroom.\n",
-        attendee_line,
-    ]
+    # Build follow-up embed
+    join_text = "[THIS](https://www.netransit.net/shift)"
+    desc = (
+        f"Please use {join_text} link to join. "
+        "Console use `/joinshift` in the game hub. "
+        "If you have any problems joining, ping the host."
+    )
+
+    embed = discord.Embed(color=discord.Color.blurple(), description=desc)
+    embed.add_field(name="Attendees", value=attendee_line, inline=False)
+
+    # Content: real ping + markdown title outside embed
+    content_lines = []
+    content_lines.append(f"<@&{RUNS_NOTIFIED_ROLE_ID}>")            # role ping (outside embed)
+    if host_id:
+        content_lines.append(f"<@{host_id}>")                        # host ping (outside embed)
+    content_lines.append("# **RUN**")                                # markdown title
+    content = "\n".join(content_lines)
 
     try:
         orig_msg = await channel.fetch_message(message_id)
-        await orig_msg.reply("\n".join(followup_lines), mention_author=False, allowed_mentions=discord.AllowedMentions(users=True))
+        await orig_msg.reply(
+            content=content,
+            embed=embed,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
+        )
     except discord.HTTPException:
-        await channel.send("\n".join(followup_lines), allowed_mentions=discord.AllowedMentions(users=True))
+        await channel.send(
+            content=content,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
+        )
 
 @tree.command(name="shift", description="Create a shift announcement for MBTA/WRTA and track attendees via :net: reaction.", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(
     game="Select the game (MBTA or WRTA)",
-    time_str="Shift date & time (e.g., '2025-09-23 4:00 PM' or '9/23 16:00')",
+    time_str="Shift date & time (e.g., '4:00 PM', 'today 4:00 PM', or '9/23 16:00')",
     routes="Routes to run (required)",
     buses_on_duty="Buses on duty (required)",
 )
@@ -305,20 +365,22 @@ async def shift_cmd(
         return
 
     game_name = game.value
-    # Build embed to match your sample
-    embed = discord.Embed(color=discord.Color.brand_green(), description="")
+
+    # Build a cleaner announcement embed
+    # (Ping will be outside the embed so it actually notifies)
+    if game_name == "MBTA":
+        loc_value = f"{game_name} <:mbtalogo:1054907034505584747>"
+    else:
+        loc_value = game_name
+
+    embed = discord.Embed(color=discord.Color.brand_green())
     embed.title = "!RUN!"
-    embed.add_field(name=f"{game_name}: Run", value="\u200b", inline=False)
-    embed.add_field(name="Location", value=f"{game_name} :mbtalogo:" if game_name == "MBTA" else game_name, inline=True)
-    embed.add_field(name="Time", value=f"{discord_abs_time(when)} ({discord_ts(when, 'R')})", inline=True)
-    embed.add_field(name="Date", value=discord_abs_date(when), inline=False)
+    embed.description = f"**{game_name}: Run**\n\nReact {NET_EMOJI} if you plan on attending!"
+    embed.add_field(name="Location", value=loc_value, inline=True)
+    embed.add_field(name="Time", value=f"{_fmt_time(when)} ({_ts(when, 'R')})", inline=True)
+    embed.add_field(name="Date", value=_fmt_date(when), inline=False)
     embed.add_field(name="Routes", value=routes, inline=True)
     embed.add_field(name="Buses On Duty", value=buses_on_duty, inline=True)
-    embed.add_field(
-        name="\u200b",
-        value=f"<@&{RUNS_NOTIFIED_ROLE_ID}>\nReact {NET_EMOJI} if you plan on attending!",
-        inline=False
-    )
 
     # Post to #shifts
     shifts_channel = interaction.client.get_channel(SHIFTS_CHANNEL_ID)
@@ -326,8 +388,15 @@ async def shift_cmd(
         await interaction.response.send_message("❌ I couldn't find the shifts channel.", ephemeral=True)
         return
 
+    # Ping role OUTSIDE the embed so it actually pings
+    content_ping = f"<@&{RUNS_NOTIFIED_ROLE_ID}>"
+
     await interaction.response.send_message(f"✅ Shift posted to {shifts_channel.mention}.", ephemeral=True)
-    posted_msg = await shifts_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
+    posted_msg = await shifts_channel.send(
+        content=content_ping,
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions(roles=True)
+    )
 
     # Add :net: reaction
     try:
@@ -340,6 +409,7 @@ async def shift_cmd(
         "when": when,
         "reactors": set(),
         "channel_id": posted_msg.channel.id,
+        "host_id": interaction.user.id,
     }
 
     # Schedule follow-up
@@ -365,19 +435,16 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     # Check emoji match (supports custom or unicode)
     emoji_ok = False
-    if isinstance(payload.emoji, discord.PartialEmoji) and NET_EMOJI.startswith("<:"):
+    if isinstance(payload.emoji, discord.PartialEmoji) and str(NET_EMOJI).startswith("<:"):
         try:
-            net_id = int(NET_EMOJI.split(":")[-1].strip(">"))
+            net_id = int(str(NET_EMOJI).split(":")[-1].strip(">"))
             emoji_ok = payload.emoji.id == net_id
         except ValueError:
             pass
     else:
         emoji_ok = (str(payload.emoji) == NET_EMOJI)
 
-    if not emoji_ok:
-        return
-
-    if payload.user_id == bot.user.id:
+    if not emoji_ok or payload.user_id == bot.user.id:
         return
 
     SHIFT_TRACK[payload.message_id]["reactors"].add(payload.user_id)
@@ -385,9 +452,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
 # ---------- Main ----------
 if __name__ == "__main__":
-    token = os.getenv("DISCORD_TOKEN")  # Set your token in the DISCORD_TOKEN environment variable
+    token = os.getenv("MTQxOTA1MDE1MzYzMjk4OTIxNA.Ges_5j.-ZJvcCMIV54sNxJbrYE4loyOyEPsiWJ2OugS7o")
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
-
-
