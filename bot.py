@@ -92,8 +92,11 @@ def _fmt_time(dt: datetime) -> str:
     except ValueError:
         return dt.strftime("%#I:%M %p")
 
+def _epoch(dt: datetime) -> int:
+    return int(dt.timestamp())
+
 def _ts(dt: datetime, style: str = "R") -> str:
-    return f"<t:{int(dt.timestamp())}:{style}>"
+    return f"<t:{_epoch(dt)}:{style}>"
 
 def parse_time_to_dt(time_str: str, tz_name: str = DEFAULT_TZ) -> datetime:
     """
@@ -276,71 +279,17 @@ async def reloadcsv_cmd(interaction: discord.Interaction):
     await interaction.response.send_message("🔄 CSV reloaded.", ephemeral=True)
 
 
-# ---------- /shift (Supervisor) ----------
-class GameChoice(discord.Enum):
-    MBTA = "MBTA"
-    WRTA = "WRTA"
-
-async def schedule_run_followup(bot: commands.Bot, message_id: int):
-    info = SHIFT_TRACK.get(message_id)
-    if not info:
-        return
-
-    when: datetime = info["when"]
-    channel = bot.get_channel(info["channel_id"])
-    host_id = info.get("host_id")
-    if not isinstance(channel, discord.TextChannel):
-        return
-
-    # Sleep until the time
-    delta = (when - datetime.now(when.tzinfo)).total_seconds()
-    if delta > 0:
-        await asyncio.sleep(delta)
-
-    # Build attendee list
-    reactors = info.get("reactors", set())
-    attendee_line = "| |" if not reactors else f"| {' '.join(f'<@{uid}>' for uid in reactors)} |"
-
-    # Build follow-up embed
-    join_text = "[THIS](https://www.netransit.net/shift)"
-    desc = (
-        f"Please use {join_text} link to join. "
-        "Console use `/joinshift` in the game hub. "
-        "If you have any problems joining, ping the host."
-    )
-
-    embed = discord.Embed(color=discord.Color.blurple(), description=desc)
-    embed.add_field(name="Attendees", value=attendee_line, inline=False)
-
-    # Content: real ping + markdown title outside embed
-    content_lines = []
-    content_lines.append(f"<@&{RUNS_NOTIFIED_ROLE_ID}>")            # role ping (outside embed)
-    if host_id:
-        content_lines.append(f"<@{host_id}>")                        # host ping (outside embed)
-    content_lines.append("# **RUN**")                                # markdown title
-    content = "\n".join(content_lines)
-
-    try:
-        orig_msg = await channel.fetch_message(message_id)
-        await orig_msg.reply(
-            content=content,
-            embed=embed,
-            mention_author=False,
-            allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
-        )
-    except discord.HTTPException:
-        await channel.send(
-            content=content,
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
-        )
-
-@tree.command(name="shift", description="Create a shift announcement for MBTA/WRTA and track attendees via :net: reaction.", guild=discord.Object(id=GUILD_ID))
+@tree.command(
+    name="shift",
+    description="Create a shift announcement for MBTA/WRTA and track attendees via :net: reaction.",
+    guild=discord.Object(id=GUILD_ID),
+)
 @app_commands.describe(
     game="Select the game (MBTA or WRTA)",
     time_str="Shift date & time (e.g., '4:00 PM', 'today 4:00 PM', or '9/23 16:00')",
     routes="Routes to run (required)",
     buses_on_duty="Buses on duty (required)",
+    notes="(Optional) Extra notes to show in the announcement",
 )
 @app_commands.choices(
     game=[
@@ -356,6 +305,7 @@ async def shift_cmd(
     time_str: str,
     routes: str,
     buses_on_duty: str,
+    notes: str | None = None,
 ):
     # Parse time
     try:
@@ -365,33 +315,36 @@ async def shift_cmd(
         return
 
     game_name = game.value
+    epoch = _epoch(when)
 
-    # Build a cleaner announcement embed
-    # (Ping will be outside the embed so it actually notifies)
+    # Location field
     if game_name == "MBTA":
         loc_value = f"{game_name} <:mbtalogo:1054907034505584747>"
     else:
         loc_value = game_name
 
+    # Build announcement embed (cleaner + pure timestamps)
     embed = discord.Embed(color=discord.Color.brand_green())
     embed.title = "!RUN!"
-    embed.description = f"**{game_name}: Run**\n\nReact {NET_EMOJI} if you plan on attending!"
+    # (Removed the old 'MBTA: Run' line.)
     embed.add_field(name="Location", value=loc_value, inline=True)
-    embed.add_field(name="Time", value=f"{_fmt_time(when)} ({_ts(when, 'R')})", inline=True)
-    embed.add_field(name="Date", value=_fmt_date(when), inline=False)
+    embed.add_field(name="Time", value=f"<t:{epoch}:T> (<t:{epoch}:R>)", inline=True)
+    embed.add_field(name="Date", value=f"<t:{epoch}:D>", inline=False)
     embed.add_field(name="Routes", value=routes, inline=True)
     embed.add_field(name="Buses On Duty", value=buses_on_duty, inline=True)
+    if notes:
+        embed.add_field(name="Notes", value=notes, inline=False)
+    embed.add_field(name="\u200b", value=f"React {NET_EMOJI} if you plan on attending!", inline=False)
 
-    # Post to #shifts
+    # Post to #shifts with role ping OUTSIDE the embed
     shifts_channel = interaction.client.get_channel(SHIFTS_CHANNEL_ID)
     if not isinstance(shifts_channel, (discord.TextChannel, discord.Thread)):
         await interaction.response.send_message("❌ I couldn't find the shifts channel.", ephemeral=True)
         return
 
-    # Ping role OUTSIDE the embed so it actually pings
     content_ping = f"<@&{RUNS_NOTIFIED_ROLE_ID}>"
-
     await interaction.response.send_message(f"✅ Shift posted to {shifts_channel.mention}.", ephemeral=True)
+
     posted_msg = await shifts_channel.send(
         content=content_ping,
         embed=embed,
@@ -404,7 +357,7 @@ async def shift_cmd(
     except discord.HTTPException:
         await shifts_channel.send("⚠️ I couldn't add the :net: reaction. Check NET_EMOJI config.")
 
-    # Track this shift
+    # Track shift for follow-up
     SHIFT_TRACK[posted_msg.id] = {
         "when": when,
         "reactors": set(),
@@ -412,20 +365,7 @@ async def shift_cmd(
         "host_id": interaction.user.id,
     }
 
-    # Schedule follow-up
     asyncio.create_task(schedule_run_followup(bot, posted_msg.id))
-
-# Friendly error if non-supervisor calls /shift
-@shift_cmd.error
-async def shift_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingRole):
-        await interaction.response.send_message("❌ You must be a **Supervisor** to use /shift.", ephemeral=True)
-    else:
-        try:
-            await interaction.response.send_message("❌ An error occurred.", ephemeral=True)
-        except discord.InteractionResponded:
-            pass
-
 
 # ---------- Reaction tracker for /shift ----------
 @bot.event
@@ -456,4 +396,5 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
 
