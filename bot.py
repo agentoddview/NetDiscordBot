@@ -1,6 +1,9 @@
-
 import csv
 import os
+import asyncio
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import discord
 from typing import Literal
 from discord import app_commands
@@ -8,10 +11,27 @@ from discord.ext import commands
 
 # ==================== CONFIG =====================
 CSV_PATH = "results.csv"
-LEAD_SUPERVISOR_ROLE_ID = 1351333124965142600
-GUILD_ID = 882441222487162912               # e.g., 123456789012345678
+
+# Roles
+LEAD_SUPERVISOR_ROLE_ID = 1351333124965142600   # for /add, /reloadcsv
+SUPERVISOR_ROLE_ID = 947288094804176957         # minimum role to run /shift
+
+# Guild/Channels/Emojis
+GUILD_ID = 882441222487162912
+SHIFTS_CHANNEL_ID = 1329659267963420703         # #shifts
+RUNS_NOTIFIED_ROLE_ID = 1332862724039774289     # @Runs Notified (or "run notifications")
+
+# If :net: is a custom emoji, set the full tag like "<:net:123456789012345678>"
+# If it's a standard Unicode emoji, you can put the emoji itself here.
+NET_EMOJI = "<:net:123456789012345678>"         # <-- update to your actual :net: emoji
+DEFAULT_TZ = "America/New_York"                 # MBTA/WRTA locale
+
+# ---------- Footer text ----------
+FOOTER_TEXT = "More questions or concerns? Please open a ticket inside the New England Transit Discord Server."
 # =================================================
 
+
+# ---------- CSV helpers ----------
 def load_results_csv(path: str = CSV_PATH):
     data = {}
     if not os.path.exists(path):
@@ -33,6 +53,8 @@ def save_results_csv(data: dict, path: str = CSV_PATH):
 
 RESULTS = load_results_csv()
 
+
+# ---------- Utilities ----------
 def possible_keys_for_user(user: discord.abc.User):
     keys = {str(user).strip().lower()}
     if getattr(user, "name", None): keys.add(user.name.strip().lower())
@@ -51,24 +73,92 @@ def color_for_decision(decision: str) -> discord.Color:
         return discord.Color(0x000000)  # black
     return discord.Color.blurple()
 
-# ---------- Footer text ----------
-FOOTER_TEXT = "More questions or concerns? Please open a ticket inside the New England Transit Discord Server."
+def has_lead_supervisor_role(member: discord.Member) -> bool:
+    return any(r.id == LEAD_SUPERVISOR_ROLE_ID for r in member.roles) or member.guild_permissions.administrator
 
+
+# ---------- Time helpers for /shift ----------
+def parse_time_to_dt(time_str: str, tz_name: str = DEFAULT_TZ) -> datetime:
+    """
+    Accepts a few friendly formats and returns a timezone-aware datetime.
+    Examples:
+      - 2025-09-23 16:00
+      - 2025/09/23 4:00 PM
+      - Tue 9/23/2025 16:00
+      - 9/23 4:00 PM        (assumes current year)
+    """
+    tz = ZoneInfo(tz_name)
+    now = datetime.now(tz)
+    patterns = [
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M",
+        "%Y-%m-%d %I:%M %p",
+        "%Y/%m/%d %I:%M %p",
+        "%a %m/%d/%Y %H:%M",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y %I:%M %p",
+        "%m/%d %H:%M",
+        "%m/%d %I:%M %p",
+    ]
+    last_err = None
+    for p in patterns:
+        try:
+            dt_naive = datetime.strptime(time_str.strip(), p)
+            if "%Y" not in p:
+                dt_naive = dt_naive.replace(year=now.year)
+            return dt_naive.replace(tzinfo=tz)
+        except ValueError as e:
+            last_err = e
+    raise ValueError(
+        f"Could not parse time '{time_str}'. Try formats like '2025-09-23 16:00' or '9/23 4:00 PM'. Last error: {last_err}"
+    )
+
+def discord_abs_date(dt: datetime) -> str:
+    # Example: Tuesday September 23, 2025
+    # Note: %-d works on Linux; on Windows, use %#d
+    try:
+        return dt.strftime("%A %B %-d, %Y")
+    except ValueError:
+        return dt.strftime("%A %B %#d, %Y")
+
+def discord_abs_time(dt: datetime) -> str:
+    # Example: 4:00 PM
+    try:
+        return dt.strftime("%-I:%M %p")
+    except ValueError:
+        return dt.strftime("%#I:%M %p")
+
+def discord_ts(dt: datetime, style: str = "R") -> str:
+    # <t:epoch:R> for relative; use :F for full, :D for date, :T for time
+    epoch = int(dt.timestamp())
+    return f"<t:{epoch}:{style}>"
+
+
+# ---------- Bot ----------
 intents = discord.Intents.default()
-intents.members = True
+intents.members = True          # resolve member -> roles
+intents.guilds = True
+intents.reactions = True        # track :net: reactions
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
+
+# In-memory shift tracker: message_id -> info
+SHIFT_TRACK: dict[int, dict] = {}
+
 
 @bot.event
 async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
-        tree.clear_commands(guild=None)      # clear globals to avoid duplicates
+        # Clear globals to avoid duplicates and sync guild-specific commands
+        tree.clear_commands(guild=None)
         await tree.sync(guild=None)
         synced = await tree.sync(guild=guild)
         print(f"Cleared globals and synced {len(synced)} command(s) to guild {GUILD_ID}. Logged in as {bot.user}.")
     except Exception as e:
         print("Slash command sync error:", e)
+
 
 # ---------- /result ----------
 @tree.command(name="result", description="DMs you your application result.", guild=discord.Object(id=GUILD_ID))
@@ -91,16 +181,12 @@ async def result_cmd(interaction: discord.Interaction):
 
     try:
         await user.send(embed=embed)
-        # 👇 no ephemeral here → visible in channel
         await interaction.response.send_message("✅ Results sent to your DMs.")
     except discord.Forbidden:
         await interaction.response.send_message("❌ I could not DM you. Please enable DMs from server members and try again.")
 
-# ---------- Permission helper ----------
-def has_lead_supervisor_role(member: discord.Member) -> bool:
-    return any(r.id == LEAD_SUPERVISOR_ROLE_ID for r in member.roles) or member.guild_permissions.administrator
 
-# ---------- /add ----------
+# ---------- /add (Lead Supervisor) ----------
 @tree.command(name="add", description="Add or update a result row (Lead Supervisor only).", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(
     user="Select a server member to add/update",
@@ -135,7 +221,8 @@ async def add_cmd(
     confirm.set_footer(text=FOOTER_TEXT)
     await interaction.response.send_message(embed=confirm, ephemeral=True)
 
-# ---------- /reloadcsv ----------
+
+# ---------- /reloadcsv (Lead Supervisor) ----------
 @tree.command(name="reloadcsv", description="Reload results from CSV (Lead Supervisor only).", guild=discord.Object(id=GUILD_ID))
 @app_commands.guild_only()
 async def reloadcsv_cmd(interaction: discord.Interaction):
@@ -146,7 +233,159 @@ async def reloadcsv_cmd(interaction: discord.Interaction):
     RESULTS = load_results_csv()
     await interaction.response.send_message("🔄 CSV reloaded.", ephemeral=True)
 
-if __name__ == "__main__":
-    token = os.getenv("DISCORD_TOKEN") or "MTQxOTA1MDE1MzYzMjk4OTIxNA.Ges_5j.-ZJvcCMIV54sNxJbrYE4loyOyEPsiWJ2OugS7o"
 
+# ---------- /shift (Supervisor) ----------
+class GameChoice(discord.Enum):
+    MBTA = "MBTA"
+    WRTA = "WRTA"
+
+async def schedule_run_followup(bot: commands.Bot, message_id: int):
+    info = SHIFT_TRACK.get(message_id)
+    if not info:
+        return
+
+    when: datetime = info["when"]
+    channel = bot.get_channel(info["channel_id"])
+    if not isinstance(channel, discord.TextChannel):
+        return
+
+    # Sleep until the time
+    delta = (when - datetime.now(when.tzinfo)).total_seconds()
+    if delta > 0:
+        await asyncio.sleep(delta)
+
+    # Build attendee list
+    reactors = info.get("reactors", set())
+    if not reactors:
+        attendee_line = "| |"
+    else:
+        mentions = " ".join(f"<@{uid}>" for uid in reactors)
+        attendee_line = f"| {mentions} |"
+
+    followup_lines = [
+        "**RUN**",
+        "Please use THIS (https://www.netransit.net/shift) link to join, Console use /joinshift in the game hub. "
+        "If you have any problems joining ping me in ⁠main-chatroom.\n",
+        attendee_line,
+    ]
+
+    try:
+        orig_msg = await channel.fetch_message(message_id)
+        await orig_msg.reply("\n".join(followup_lines), mention_author=False, allowed_mentions=discord.AllowedMentions(users=True))
+    except discord.HTTPException:
+        await channel.send("\n".join(followup_lines), allowed_mentions=discord.AllowedMentions(users=True))
+
+@tree.command(name="shift", description="Create a shift announcement for MBTA/WRTA and track attendees via :net: reaction.", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(
+    game="Select the game (MBTA or WRTA)",
+    time_str="Shift date & time (e.g., '2025-09-23 4:00 PM' or '9/23 16:00')",
+    routes="Routes to run (required)",
+    buses_on_duty="Buses on duty (required)",
+)
+@app_commands.choices(
+    game=[
+        app_commands.Choice(name="MBTA", value="MBTA"),
+        app_commands.Choice(name="WRTA", value="WRTA"),
+    ]
+)
+@app_commands.checks.has_role(SUPERVISOR_ROLE_ID)  # Require Supervisor
+@app_commands.guild_only()
+async def shift_cmd(
+    interaction: discord.Interaction,
+    game: app_commands.Choice[str],
+    time_str: str,
+    routes: str,
+    buses_on_duty: str,
+):
+    # Parse time
+    try:
+        when = parse_time_to_dt(time_str, DEFAULT_TZ)
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return
+
+    game_name = game.value
+    # Build embed to match your sample
+    embed = discord.Embed(color=discord.Color.brand_green(), description="")
+    embed.title = "!RUN!"
+    embed.add_field(name=f"{game_name}: Run", value="\u200b", inline=False)
+    embed.add_field(name="Location", value=f"{game_name} :mbtalogo:" if game_name == "MBTA" else game_name, inline=True)
+    embed.add_field(name="Time", value=f"{discord_abs_time(when)} ({discord_ts(when, 'R')})", inline=True)
+    embed.add_field(name="Date", value=discord_abs_date(when), inline=False)
+    embed.add_field(name="Routes", value=routes, inline=True)
+    embed.add_field(name="Buses On Duty", value=buses_on_duty, inline=True)
+    embed.add_field(
+        name="\u200b",
+        value=f"<@&{RUNS_NOTIFIED_ROLE_ID}>\nReact {NET_EMOJI} if you plan on attending!",
+        inline=False
+    )
+
+    # Post to #shifts
+    shifts_channel = interaction.client.get_channel(SHIFTS_CHANNEL_ID)
+    if not isinstance(shifts_channel, (discord.TextChannel, discord.Thread)):
+        await interaction.response.send_message("❌ I couldn't find the shifts channel.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"✅ Shift posted to {shifts_channel.mention}.", ephemeral=True)
+    posted_msg = await shifts_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
+
+    # Add :net: reaction
+    try:
+        await posted_msg.add_reaction(NET_EMOJI)
+    except discord.HTTPException:
+        await shifts_channel.send("⚠️ I couldn't add the :net: reaction. Check NET_EMOJI config.")
+
+    # Track this shift
+    SHIFT_TRACK[posted_msg.id] = {
+        "when": when,
+        "reactors": set(),
+        "channel_id": posted_msg.channel.id,
+    }
+
+    # Schedule follow-up
+    asyncio.create_task(schedule_run_followup(bot, posted_msg.id))
+
+# Friendly error if non-supervisor calls /shift
+@shift_cmd.error
+async def shift_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingRole):
+        await interaction.response.send_message("❌ You must be a **Supervisor** to use /shift.", ephemeral=True)
+    else:
+        try:
+            await interaction.response.send_message("❌ An error occurred.", ephemeral=True)
+        except discord.InteractionResponded:
+            pass
+
+
+# ---------- Reaction tracker for /shift ----------
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.message_id not in SHIFT_TRACK:
+        return
+
+    # Check emoji match (supports custom or unicode)
+    emoji_ok = False
+    if isinstance(payload.emoji, discord.PartialEmoji) and NET_EMOJI.startswith("<:"):
+        try:
+            net_id = int(NET_EMOJI.split(":")[-1].strip(">"))
+            emoji_ok = payload.emoji.id == net_id
+        except ValueError:
+            pass
+    else:
+        emoji_ok = (str(payload.emoji) == NET_EMOJI)
+
+    if not emoji_ok:
+        return
+
+    if payload.user_id == bot.user.id:
+        return
+
+    SHIFT_TRACK[payload.message_id]["reactors"].add(payload.user_id)
+
+
+# ---------- Main ----------
+if __name__ == "__main__":
+    token = os.getenv("MTQxOTA1MDE1MzYzMjk4OTIxNA.Ges_5j.-ZJvcCMIV54sNxJbrYE4loyOyEPsiWJ2OugS7o")  # Set your token in the DISCORD_TOKEN environment variable
+    if not token:
+        raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
