@@ -23,7 +23,7 @@ RUNS_NOTIFIED_ROLE_ID = 1332862724039774289     # @Runs Notified (or "run notifi
 
 # If :net: is a custom emoji, set the full tag like "<:net:123456789012345678>"
 # If it's a standard Unicode emoji, you can put the emoji itself here.
-NET_EMOJI = "<:net:123456789012345678>"         # <-- update to your actual :net: emoji
+NET_EMOJI = "<:net:1323882053858492437>"         # <-- update to your actual :net: emoji
 DEFAULT_TZ = "America/New_York"                 # MBTA/WRTA locale
 
 # ---------- Footer text ----------
@@ -389,4 +389,5 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
 
