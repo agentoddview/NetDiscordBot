@@ -385,7 +385,8 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
 # ---------- Main ----------
 if __name__ == "__main__":
-    token = os.getenv("MTQxOTA1MDE1MzYzMjk4OTIxNA.Ges_5j.-ZJvcCMIV54sNxJbrYE4loyOyEPsiWJ2OugS7o")  # Set your token in the DISCORD_TOKEN environment variable
+    token = os.getenv("DISCORD_TOKEN")  # Set your token in the DISCORD_TOKEN environment variable
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
