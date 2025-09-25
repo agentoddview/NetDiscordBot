@@ -23,7 +23,7 @@ RUNS_NOTIFIED_ROLE_ID = 1332862724039774289     # @Runs Notified (or "run notifi
 
 # If :net: is a custom emoji, set the full tag like "<:net:123456789012345678>"
 # If it's a standard Unicode emoji, you can put the emoji itself here.
-NET_EMOJI = "🧠"  # <-- REPLACE with your :net: (e.g., "<:net:123456789012345678>")
+NET_EMOJI = "<:net:1323882053858492437>"  # <-- REPLACE with your :net: (e.g., "<:net:123456789012345678>")
 DEFAULT_TZ = "America/New_York"                 # MBTA/WRTA locale
 
 # ---------- Footer text ----------
@@ -452,7 +452,8 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
 # ---------- Main ----------
 if __name__ == "__main__":
-    token = os.getenv("MTQxOTA1MDE1MzYzMjk4OTIxNA.Ges_5j.-ZJvcCMIV54sNxJbrYE4loyOyEPsiWJ2OugS7o")
+    token = os.getenv("DISCORD_TOKEN")
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
