@@ -426,14 +426,18 @@ async def shift_cmd(
     if game_name == "MBTA":
         embed.set_thumbnail(url="https://i.imgur.com/uYNgKE3.png")
 
-    embed.add_field(name="Location", value=loc_value, inline=True)
-    embed.add_field(name="Time", value=f"<t:{epoch}:t> (<t:{epoch}:R>)", inline=True)  # short time, no seconds
-    embed.add_field(name="Date", value=f"<t:{epoch}:D>", inline=False)
-    embed.add_field(name="Routes", value=routes, inline=True)
-    embed.add_field(name="Buses On Duty", value=buses_on_duty, inline=True)
-    if notes:
-        embed.add_field(name="Notes", value=notes, inline=False)
-    embed.add_field(name="\u200b", value=f"React {NET_EMOJI} if you plan on attending!", inline=False)
+        embed.add_field(name="Location", value=loc_value, inline=True)
+        embed.add_field(name="Time", value=f"<t:{epoch}:t> (<t:{epoch}:R>)", inline=True)  # short time, no seconds
+        embed.add_field(name="Date", value=f"<t:{epoch}:D>", inline=False)
+        
+        # 👇 NEW: host mention in the first embed
+        embed.add_field(name="Host", value=f"<@{interaction.user.id}>", inline=True)
+        
+        embed.add_field(name="Routes", value=routes, inline=True)
+        embed.add_field(name="Buses On Duty", value=buses_on_duty, inline=True)
+        if notes:
+            embed.add_field(name="Notes", value=notes, inline=False)
+        embed.add_field(name="\u200b", value=f"React {NET_EMOJI} if you plan on attending!", inline=False)
 
     # Footer with extra italic line
     embed.set_footer(
@@ -502,4 +506,5 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
 
