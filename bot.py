@@ -54,6 +54,16 @@ def save_results_csv(data: dict, path: str = CSV_PATH):
 
 RESULTS = load_results_csv()
 
+def _resolve_message_id(maybe_link_or_id: str) -> int:
+    s = maybe_link_or_id.strip()
+    # Accept raw ID
+    if s.isdigit():
+        return int(s)
+    # Accept message links: https://discord.com/channels/<guild>/<channel>/<message>
+    parts = s.split("/")
+    if len(parts) >= 3 and parts[-1].isdigit():
+        return int(parts[-1])
+    raise ValueError("Please provide a valid message ID or message link.")
 
 # ---------- Utilities ----------
 def possible_keys_for_user(user: discord.abc.User):
@@ -301,6 +311,9 @@ class ShiftFollowupView(discord.ui.View):
 async def schedule_run_followup(bot: commands.Bot, message_id: int):
     """Runs at the scheduled time; posts the Shift Happening follow-up."""
     info = SHIFT_TRACK.get(message_id)
+        if info.get("canceled"):
+        print(f"[shift] followup: message {message_id} was canceled; skipping.")
+        return
     if not info:
         print(f"[shift] followup: message {message_id} not found in tracker")
         return
@@ -477,10 +490,112 @@ async def shift_cmd(
         "reactors": set(),
         "channel_id": posted_msg.channel.id,
         "host_id": interaction.user.id,
+        "task": None,  # NEW: store the sleeper so we can cancel it
     }
 
     print(f"[shift] scheduled followup at {when.isoformat()} for message {posted_msg.id}")
-    asyncio.create_task(schedule_run_followup(bot, posted_msg.id))
+    task = asyncio.create_task(schedule_run_followup(bot, posted_msg.id))
+    SHIFT_TRACK[posted_msg.id]["task"] = task
+
+@tree.command(
+    name="cancelshift",
+    description="Cancel a posted shift (stops its follow-up and notifies attendees).",
+    guild=discord.Object(id=GUILD_ID),
+)
+@app_commands.describe(
+    message_id_or_link="Message ID or link of the original shift announcement.",
+    notes="(Optional) Extra notes to include in the cancel message."
+)
+@app_commands.checks.has_role(SUPERVISOR_ROLE_ID)  # Require Supervisor role to run
+@app_commands.guild_only()
+async def cancelshift_cmd(
+    interaction: discord.Interaction,
+    message_id_or_link: str,
+    notes: str | None = None,
+):
+    # Validate message id
+    try:
+        target_id = _resolve_message_id(message_id_or_link)
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return
+
+    info = SHIFT_TRACK.get(target_id)
+    if not info:
+        await interaction.response.send_message("❌ I can't find a tracked shift with that message ID.", ephemeral=True)
+        return
+
+    # Permission: either the original host OR any Supervisor (this command already requires the role)
+    is_host = (interaction.user.id == info.get("host_id"))
+    if not is_host:
+        # still allowed since they have the Supervisor role due to the check above
+        pass
+
+    # Stop the scheduled follow-up if it's still pending
+    task: asyncio.Task | None = info.get("task")
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    # Build attendees mention list
+    reactors = info.get("reactors", set())
+    attendees_mentions = " ".join(f"<@{uid}>" for uid in reactors)
+    attendees_ping_line = attendees_mentions if attendees_mentions else ""
+
+    # Compose time & host strings
+    when: datetime = info["when"]
+    when_str = f"{_fmt_date(when)} at {_fmt_time(when)}"
+    host_id = info.get("host_id")
+    host_mention = f"<@{host_id}>" if host_id else "the host"
+
+    # Channel and original message (to reply under it if possible)
+    channel = interaction.client.get_channel(info["channel_id"])
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message("❌ I can't access the original channel.", ephemeral=True)
+        return
+
+    # Cancel embed
+    header = "# Shift Canceled"
+    desc = (
+        f"Unfortunately, the shift that was supposed to happen **{when_str}** "
+        f"was canceled by {host_mention}."
+    )
+
+    embed = discord.Embed(
+        title="Shift Canceled",
+        description=desc,
+        color=discord.Color.red()
+    )
+    embed.add_field(name="Host", value=host_mention, inline=True)
+    embed.add_field(name="Scheduled Time", value=when_str, inline=True)
+    if notes:
+        embed.add_field(name="Notes", value=notes, inline=False)
+    embed.set_footer(text=FOOTER_TEXT)
+
+    try:
+        orig_msg = await channel.fetch_message(target_id)
+        await orig_msg.reply(
+            content=f"{header}\n{attendees_ping_line}",
+            embed=embed,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+    except discord.HTTPException:
+        # If replying fails, post a new message in the channel
+        await channel.send(
+            content=f"{header}\n{attendees_ping_line}",
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+
+    # Mark as canceled so we don't reuse it (optional: you can also del it)
+    info["canceled"] = True
+    SHIFT_TRACK[target_id] = info
+
+    await interaction.response.send_message("✅ Shift canceled and attendees notified.", ephemeral=True)
 
 
 # ---------- Reaction tracker for /shift ----------
@@ -512,6 +627,7 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
 
 
 
