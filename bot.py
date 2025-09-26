@@ -431,9 +431,9 @@ async def shift_cmd(
     embed.add_field(name="Date", value=f"<t:{epoch}:D>", inline=False)
     embed.add_field(name="Routes", value=routes, inline=True)
     embed.add_field(name="Buses On Duty", value=buses_on_duty, inline=True)
-    if notes:
-    embed.add_field(name="Notes", value=notes, inline=False)
-    embed.add_field(name="\u200b", value=f"React {NET_EMOJI} if you plan on attending!", inline=False)
+        if notes:
+        embed.add_field(name="Notes", value=notes, inline=False)
+        embed.add_field(name="\u200b", value=f"React {NET_EMOJI} if you plan on attending!", inline=False)
     
     # Footer with extra italic line
     embed.set_footer(
@@ -501,6 +501,7 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
 
 
 
