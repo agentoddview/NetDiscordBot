@@ -54,16 +54,6 @@ def save_results_csv(data: dict, path: str = CSV_PATH):
 
 RESULTS = load_results_csv()
 
-def _resolve_message_id(maybe_link_or_id: str) -> int:
-    s = maybe_link_or_id.strip()
-    # Accept raw ID
-    if s.isdigit():
-        return int(s)
-    # Accept message links: https://discord.com/channels/<guild>/<channel>/<message>
-    parts = s.split("/")
-    if len(parts) >= 3 and parts[-1].isdigit():
-        return int(parts[-1])
-    raise ValueError("Please provide a valid message ID or message link.")
 
 # ---------- Utilities ----------
 def possible_keys_for_user(user: discord.abc.User):
@@ -311,11 +301,13 @@ class ShiftFollowupView(discord.ui.View):
 async def schedule_run_followup(bot: commands.Bot, message_id: int):
     """Runs at the scheduled time; posts the Shift Happening follow-up."""
     info = SHIFT_TRACK.get(message_id)
-        if info.get("canceled"):
-        print(f"[shift] followup: message {message_id} was canceled; skipping.")
-        return
     if not info:
         print(f"[shift] followup: message {message_id} not found in tracker")
+        return
+
+    # Guard for canceled shifts (in case cancel happened without task cancellation)
+    if info.get("canceled"):
+        print(f"[shift] followup: message {message_id} was canceled; skipping.")
         return
 
     when: datetime = info["when"]
@@ -328,7 +320,11 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
     delta = (when - datetime.now(when.tzinfo)).total_seconds()
     if delta > 0:
         print(f"[shift] followup: sleeping {int(delta)}s for message {message_id}")
-        await asyncio.sleep(delta)
+        try:
+            await asyncio.sleep(delta)
+        except asyncio.CancelledError:
+            print(f"[shift] followup: sleeper for {message_id} canceled.")
+            return
     else:
         print(f"[shift] followup: time already passed by {-int(delta)}s; posting now for message {message_id}")
 
@@ -361,7 +357,7 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
     )
     embed = discord.Embed(color=discord.Color.blurple(), description=desc)
     
-    # 👇 NEW: host mention in the follow-up embed
+    # Host mention in the follow-up embed
     host_id = info.get("host_id")
     if host_id:
         embed.add_field(name="Host", value=f"<@{host_id}>", inline=True)
@@ -449,7 +445,7 @@ async def shift_cmd(
         embed.add_field(name="Time", value=f"<t:{epoch}:t> (<t:{epoch}:R>)", inline=True)  # short time, no seconds
         embed.add_field(name="Date", value=f"<t:{epoch}:D>", inline=False)
         
-        # 👇 NEW: host mention in the first embed
+        # Host mention in the first embed
         embed.add_field(name="Host", value=f"<@{interaction.user.id}>", inline=True)
         
         embed.add_field(name="Routes", value=routes, inline=True)
@@ -484,19 +480,57 @@ async def shift_cmd(
     except discord.HTTPException:
         await shifts_channel.send("⚠️ I couldn't add the :net: reaction. Check NET_EMOJI config.")
 
-    # Track shift for follow-up
+    # Track shift for follow-up (store the sleeper task so we can cancel on /cancelshift)
     SHIFT_TRACK[posted_msg.id] = {
         "when": when,
         "reactors": set(),
         "channel_id": posted_msg.channel.id,
         "host_id": interaction.user.id,
-        "task": None,  # NEW: store the sleeper so we can cancel it
+        "task": None,  # NEW
     }
 
     print(f"[shift] scheduled followup at {when.isoformat()} for message {posted_msg.id}")
     task = asyncio.create_task(schedule_run_followup(bot, posted_msg.id))
     SHIFT_TRACK[posted_msg.id]["task"] = task
 
+
+# ---------- Reaction tracker for /shift ----------
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.message_id not in SHIFT_TRACK:
+        return
+
+    # Check emoji match (supports custom or unicode)
+    emoji_ok = False
+    if isinstance(payload.emoji, discord.PartialEmoji) and str(NET_EMOJI).startswith("<:"):
+        try:
+            net_id = int(str(NET_EMOJI).split(":")[-1].strip(">"))
+            emoji_ok = payload.emoji.id == net_id
+        except ValueError:
+            pass
+    else:
+        emoji_ok = (str(payload.emoji) == NET_EMOJI)
+
+    if not emoji_ok or payload.user_id == bot.user.id:
+        return
+
+    SHIFT_TRACK[payload.message_id]["reactors"].add(payload.user_id)
+
+
+# ---------- Helper: accept message link or raw ID ----------
+def _resolve_message_id(maybe_link_or_id: str) -> int:
+    s = maybe_link_or_id.strip()
+    # Accept raw ID
+    if s.isdigit():
+        return int(s)
+    # Accept message links: https://discord.com/channels/<guild>/<channel>/<message>
+    parts = s.split("/")
+    if len(parts) >= 3 and parts[-1].isdigit():
+        return int(parts[-1])
+    raise ValueError("Please provide a valid message ID or message link.")
+
+
+# ---------- /cancelshift (Supervisor) ----------
 @tree.command(
     name="cancelshift",
     description="Cancel a posted shift (stops its follow-up and notifies attendees).",
@@ -526,9 +560,9 @@ async def cancelshift_cmd(
         return
 
     # Permission: either the original host OR any Supervisor (this command already requires the role)
+    # Keeping check for clarity; no hard block if not host because role check passed.
     is_host = (interaction.user.id == info.get("host_id"))
     if not is_host:
-        # still allowed since they have the Supervisor role due to the check above
         pass
 
     # Stop the scheduled follow-up if it's still pending
@@ -591,34 +625,11 @@ async def cancelshift_cmd(
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
 
-    # Mark as canceled so we don't reuse it (optional: you can also del it)
+    # Mark as canceled so we don't reuse it
     info["canceled"] = True
     SHIFT_TRACK[target_id] = info
 
     await interaction.response.send_message("✅ Shift canceled and attendees notified.", ephemeral=True)
-
-
-# ---------- Reaction tracker for /shift ----------
-@bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    if payload.message_id not in SHIFT_TRACK:
-        return
-
-    # Check emoji match (supports custom or unicode)
-    emoji_ok = False
-    if isinstance(payload.emoji, discord.PartialEmoji) and str(NET_EMOJI).startswith("<:"):
-        try:
-            net_id = int(str(NET_EMOJI).split(":")[-1].strip(">"))
-            emoji_ok = payload.emoji.id == net_id
-        except ValueError:
-            pass
-    else:
-        emoji_ok = (str(payload.emoji) == NET_EMOJI)
-
-    if not emoji_ok or payload.user_id == bot.user.id:
-        return
-
-    SHIFT_TRACK[payload.message_id]["reactors"].add(payload.user_id)
 
 
 # ---------- Main ----------
@@ -627,7 +638,3 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
-
-
-
-
