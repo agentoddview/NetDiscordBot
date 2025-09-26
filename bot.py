@@ -20,7 +20,7 @@ SUPERVISOR_ROLE_ID = 947288094804176957         # minimum role to run /shift
 # Guild/Channels/Emojis
 GUILD_ID = 882441222487162912
 SHIFTS_CHANNEL_ID = 1329659267963420703         # #shifts
-RUNS_NOTIFIED_ROLE_ID = 947288094804176957     # @Runs Notified (or "run notifications")
+RUNS_NOTIFIED_ROLE_ID = 1332862724039774289     # @Runs Notified (or "run notifications")
 
 # If :net: is a custom emoji, set the full tag like "<:net:123456789012345678>"
 # If it's a standard Unicode emoji, you can put the emoji itself here.
@@ -299,7 +299,7 @@ class ShiftFollowupView(discord.ui.View):
 
 # ---------- FOLLOW-UP TASK (define BEFORE /shift) ----------
 async def schedule_run_followup(bot: commands.Bot, message_id: int):
-    """Runs at the scheduled time; posts the Shift Happening follow-up."""
+    """Shifts at the scheduled time; posts the Shift Happening follow-up."""
     info = SHIFT_TRACK.get(message_id)
     if not info:
         print(f"[shift] followup: message {message_id} not found in tracker")
@@ -435,7 +435,7 @@ async def shift_cmd(
 
     # Build announcement embed (cleaner + pure timestamps)
     embed = discord.Embed(color=discord.Color.brand_green())
-    embed.title = "!RUN!"
+    embed.title = "!SHIFT!"
 
     # Only show the small top-right image for MBTA
     if game_name == "MBTA":
@@ -693,5 +693,6 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
 
 
