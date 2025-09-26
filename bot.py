@@ -418,11 +418,16 @@ async def shift_cmd(
     # Location field
     loc_value = f"{game_name} <:mbtalogo:1054907034505584747>" if game_name == "MBTA" else game_name
 
-    # Build announcement embed (cleaner + pure timestamps)
+ # Build announcement embed (cleaner + pure timestamps)
     embed = discord.Embed(color=discord.Color.brand_green())
     embed.title = "!RUN!"
+    
+    # ✅ Only show the small top-right image for MBTA
+    if game_name == "MBTA":
+        embed.set_thumbnail(url="https://i.imgur.com/uYNgKE3.png")
+    
     embed.add_field(name="Location", value=loc_value, inline=True)
-    embed.add_field(name="Time", value=f"<t:{epoch}:T> (<t:{epoch}:R>)", inline=True)
+    embed.add_field(name="Time", value=f"<t:{epoch}:t> (<t:{epoch}:R>)", inline=True)  # short time, no seconds
     embed.add_field(name="Date", value=f"<t:{epoch}:D>", inline=False)
     embed.add_field(name="Routes", value=routes, inline=True)
     embed.add_field(name="Buses On Duty", value=buses_on_duty, inline=True)
@@ -492,6 +497,7 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
 
 
 
