@@ -270,7 +270,7 @@ async def reloadcsv_cmd(interaction: discord.Interaction):
 
 # ---------- FOLLOW-UP TASK (define BEFORE /shift) ----------
 async def schedule_run_followup(bot: commands.Bot, message_id: int):
-    """Runs at the scheduled time; posts the RUN follow-up."""
+    """Runs at the scheduled time; posts the Shift Happening follow-up."""
     info = SHIFT_TRACK.get(message_id)
     if not info:
         print(f"[shift] followup: message {message_id} not found in tracker")
@@ -278,8 +278,6 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
 
     when: datetime = info["when"]
     channel = bot.get_channel(info["channel_id"])
-    host_id = info.get("host_id")
-
     if not isinstance(channel, discord.TextChannel):
         print(f"[shift] followup: channel missing for message {message_id}")
         return
@@ -292,11 +290,27 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
     else:
         print(f"[shift] followup: time already passed by {-int(delta)}s; posting now for message {message_id}")
 
-    # Build attendee list from reactions we tracked
+    # Build attendees list from tracked reactions
     reactors = info.get("reactors", set())
+    attendees_mentions = " ".join(f"<@{uid}>" for uid in reactors)
     attendee_line = "| |" if not reactors else f"| {' '.join(f'<@{uid}>' for uid in reactors)} |"
 
-    # Follow-up embed
+    # Random big image inside the embed
+    images = [
+        "https://i.imgur.com/BMIzRKJ.jpeg",
+        "https://i.imgur.com/h4KISNW.png",
+        "https://i.imgur.com/scoVlB7.png",
+        "https://i.imgur.com/rmcIwnq.png",
+        "https://i.imgur.com/5cJuCUt.png",
+        "https://i.imgur.com/aSJvclP.png",
+        "https://i.imgur.com/kztq1gq.jpeg",
+        "https://i.imgur.com/wxiIM8C.png",
+        "https://i.imgur.com/LgthyeB.png",
+        "https://i.imgur.com/XySPomR.png",
+    ]
+    img_url = random.choice(images)
+
+    # Follow-up embed (with big image; links & code formatting)
     join_text = "[THIS](https://www.netransit.net/shift)"
     desc = (
         f"Please use {join_text} link to join. "
@@ -305,13 +319,11 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
     )
     embed = discord.Embed(color=discord.Color.blurple(), description=desc)
     embed.add_field(name="Attendees", value=attendee_line, inline=False)
+    embed.set_image(url=img_url)
 
-    # Content: pings + markdown title OUTSIDE the embed
-    content_lines = [f"<@&{RUNS_NOTIFIED_ROLE_ID}>"]
-    if host_id:
-        content_lines.append(f"<@{host_id}>")
-    content_lines.append("# **RUN**")
-    content = "\n".join(content_lines)
+    # Content: ONLY the reactors get pinged + header; no role/host pings
+    header = "# **Shift Happening**"
+    content = f"{header}\n{attendees_mentions}" if attendees_mentions else header
 
     try:
         orig_msg = await channel.fetch_message(message_id)
@@ -319,17 +331,16 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
             content=content,
             embed=embed,
             mention_author=False,
-            allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
         print(f"[shift] followup: posted reply under {message_id}")
     except discord.HTTPException as e:
         await channel.send(
             content=content,
             embed=embed,
-            allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
         print(f"[shift] followup: posted new msg in channel (reply failed): {e}")
-
 
 # ---------- /shift (Supervisor) ----------
 @tree.command(
@@ -447,3 +458,4 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
