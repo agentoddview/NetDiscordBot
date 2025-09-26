@@ -431,10 +431,14 @@ async def shift_cmd(
     embed.add_field(name="Date", value=f"<t:{epoch}:D>", inline=False)
     embed.add_field(name="Routes", value=routes, inline=True)
     embed.add_field(name="Buses On Duty", value=buses_on_duty, inline=True)
-    if notes:
+      if notes:
         embed.add_field(name="Notes", value=notes, inline=False)
     embed.add_field(name="\u200b", value=f"React {NET_EMOJI} if you plan on attending!", inline=False)
-
+    
+    # Footer with extra italic line
+    embed.set_footer(
+        text=f"{FOOTER_TEXT}\n\n*You must react with the emoji if you want to be notified.*"
+    )
     # Post to #shifts with role ping OUTSIDE the embed
     shifts_channel = interaction.client.get_channel(SHIFTS_CHANNEL_ID)
     if not isinstance(shifts_channel, (discord.TextChannel, discord.Thread)):
@@ -497,6 +501,7 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
 
 
 
