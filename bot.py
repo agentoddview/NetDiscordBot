@@ -184,7 +184,6 @@ SHIFT_TRACK: dict[int, dict] = {}
 
 
 @bot.event
-@bot.event
 async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
@@ -269,11 +268,11 @@ async def reloadcsv_cmd(interaction: discord.Interaction):
     global RESULTS
     RESULTS = load_results_csv()
     await interaction.response.send_message("🔄 CSV reloaded.", ephemeral=True)
-    
+
+
 # -------- Extra Buttons
 class ShiftFollowupView(discord.ui.View):
     def __init__(self):
-        # timeout=None => persistent; use a stable custom_id for persisted components
         super().__init__(timeout=None)
         # 📎 Direct Join (link button; Discord controls its color)
         self.add_item(discord.ui.Button(
@@ -283,7 +282,6 @@ class ShiftFollowupView(discord.ui.View):
             url="https://www.netransit.net/shift"
         ))
 
-    # Blue help button (Primary)
     @discord.ui.button(
         label="How to /joinshift",
         style=discord.ButtonStyle.primary,
@@ -297,6 +295,7 @@ class ShiftFollowupView(discord.ui.View):
         embed = discord.Embed(description=msg, color=discord.Color.blurple())
         embed.set_footer(text="Any extra issues? Contact the host or make a ticket.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 # ---------- FOLLOW-UP TASK (define BEFORE /shift) ----------
 async def schedule_run_followup(bot: commands.Bot, message_id: int):
@@ -376,6 +375,7 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
         )
         print(f"[shift] followup: posted new msg in channel (reply failed): {e}")
 
+
 # ---------- /shift (Supervisor) ----------
 @tree.command(
     name="shift",
@@ -418,27 +418,28 @@ async def shift_cmd(
     # Location field
     loc_value = f"{game_name} <:mbtalogo:1054907034505584747>" if game_name == "MBTA" else game_name
 
- # Build announcement embed (cleaner + pure timestamps)
+    # Build announcement embed (cleaner + pure timestamps)
     embed = discord.Embed(color=discord.Color.brand_green())
     embed.title = "!RUN!"
-    
-    # ✅ Only show the small top-right image for MBTA
+
+    # Only show the small top-right image for MBTA
     if game_name == "MBTA":
         embed.set_thumbnail(url="https://i.imgur.com/uYNgKE3.png")
-    
+
     embed.add_field(name="Location", value=loc_value, inline=True)
     embed.add_field(name="Time", value=f"<t:{epoch}:t> (<t:{epoch}:R>)", inline=True)  # short time, no seconds
     embed.add_field(name="Date", value=f"<t:{epoch}:D>", inline=False)
     embed.add_field(name="Routes", value=routes, inline=True)
     embed.add_field(name="Buses On Duty", value=buses_on_duty, inline=True)
-        if notes:
+    if notes:
         embed.add_field(name="Notes", value=notes, inline=False)
-        embed.add_field(name="\u200b", value=f"React {NET_EMOJI} if you plan on attending!", inline=False)
-    
+    embed.add_field(name="\u200b", value=f"React {NET_EMOJI} if you plan on attending!", inline=False)
+
     # Footer with extra italic line
     embed.set_footer(
         text=f"{FOOTER_TEXT}\n\n*You must react with the emoji if you want to be notified.*"
     )
+
     # Post to #shifts with role ping OUTSIDE the embed
     shifts_channel = interaction.client.get_channel(SHIFTS_CHANNEL_ID)
     if not isinstance(shifts_channel, (discord.TextChannel, discord.Thread)):
@@ -501,11 +502,3 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
-
-
-
-
-
-
-
-
