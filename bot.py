@@ -347,6 +347,12 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
         "If you have any problems joining, ping the host."
     )
     embed = discord.Embed(color=discord.Color.blurple(), description=desc)
+    
+    # 👇 NEW: host mention in the follow-up embed
+    host_id = info.get("host_id")
+    if host_id:
+        embed.add_field(name="Host", value=f"<@{host_id}>", inline=True)
+    
     embed.add_field(name="Attendees", value=attendee_line, inline=False)
     embed.set_image(url=img_url)
 
@@ -506,5 +512,6 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
 
 
