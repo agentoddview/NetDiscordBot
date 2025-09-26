@@ -184,6 +184,7 @@ SHIFT_TRACK: dict[int, dict] = {}
 
 
 @bot.event
+@bot.event
 async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
@@ -191,6 +192,7 @@ async def on_ready():
         await tree.sync(guild=None)
         synced = await tree.sync(guild=guild)
         print(f"Cleared globals and synced {len(synced)} command(s) to guild {GUILD_ID}. Logged in as {bot.user}.")
+        bot.add_view(ShiftFollowupView())  # <- persist buttons
     except Exception as e:
         print("Slash command sync error:", e)
 
@@ -267,7 +269,34 @@ async def reloadcsv_cmd(interaction: discord.Interaction):
     global RESULTS
     RESULTS = load_results_csv()
     await interaction.response.send_message("🔄 CSV reloaded.", ephemeral=True)
+    
+# -------- Extra Buttons
+class ShiftFollowupView(discord.ui.View):
+    def __init__(self):
+        # timeout=None => persistent; use a stable custom_id for persisted components
+        super().__init__(timeout=None)
+        # 📎 Direct Join (link button; Discord controls its color)
+        self.add_item(discord.ui.Button(
+            label="Direct Join",
+            emoji="📎",
+            style=discord.ButtonStyle.link,
+            url="https://www.netransit.net/shift"
+        ))
 
+    # Blue help button (Primary)
+    @discord.ui.button(
+        label="How to /joinshift",
+        style=discord.ButtonStyle.primary,
+        custom_id="shift_help_btn"  # needed for persistence across restarts
+    )
+    async def help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        msg = (
+            'Go To Roblox, click **Play**, and before going to **Lower Mystic** type **`/joinshift`**. '
+            'It should teleport you directly to a server.'
+        )
+        embed = discord.Embed(description=msg, color=discord.Color.blurple())
+        embed.set_footer(text="Any extra issues? Contact the host or make a ticket.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ---------- FOLLOW-UP TASK (define BEFORE /shift) ----------
 async def schedule_run_followup(bot: commands.Bot, message_id: int):
@@ -311,7 +340,7 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
     ]
     img_url = random.choice(images)
 
-    # Follow-up embed (with big image; links & code formatting)
+    # Follow-up embed (with big image; link in body)
     join_text = "[THIS](https://www.netransit.net/shift)"
     desc = (
         f"Please use {join_text} link to join. "
@@ -322,15 +351,18 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
     embed.add_field(name="Attendees", value=attendee_line, inline=False)
     embed.set_image(url=img_url)
 
-    # Content: ONLY the reactors get pinged + header; no role/host pings
+    # Content: header + attendees ping only (no role/host ping)
     header = "# **Shift Happening**"
     content = f"{header}\n{attendees_mentions}" if attendees_mentions else header
+
+    view = ShiftFollowupView()
 
     try:
         orig_msg = await channel.fetch_message(message_id)
         await orig_msg.reply(
             content=content,
             embed=embed,
+            view=view,
             mention_author=False,
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
@@ -339,6 +371,7 @@ async def schedule_run_followup(bot: commands.Bot, message_id: int):
         await channel.send(
             content=content,
             embed=embed,
+            view=view,
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
         print(f"[shift] followup: posted new msg in channel (reply failed): {e}")
@@ -459,5 +492,6 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
 
 
