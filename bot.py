@@ -20,7 +20,7 @@ SUPERVISOR_ROLE_ID = 947288094804176957         # minimum role to run /shift
 # Guild/Channels/Emojis
 GUILD_ID = 882441222487162912
 SHIFTS_CHANNEL_ID = 1329659267963420703         # #shifts
-RUNS_NOTIFIED_ROLE_ID = 1332862724039774289     # @Runs Notified (or "run notifications")
+RUNS_NOTIFIED_ROLE_ID = 1392329893282578504     # @Runs Notified (or "run notifications")
 
 # If :net: is a custom emoji, set the full tag like "<:net:123456789012345678>"
 # If it's a standard Unicode emoji, you can put the emoji itself here.
@@ -559,12 +559,6 @@ async def cancelshift_cmd(
         await interaction.response.send_message("❌ I can't find a tracked shift with that message ID.", ephemeral=True)
         return
 
-    # Permission: either the original host OR any Supervisor (this command already requires the role)
-    # Keeping check for clarity; no hard block if not host because role check passed.
-    is_host = (interaction.user.id == info.get("host_id"))
-    if not is_host:
-        pass
-
     # Stop the scheduled follow-up if it's still pending
     task: asyncio.Task | None = info.get("task")
     if task and not task.done():
@@ -632,10 +626,70 @@ async def cancelshift_cmd(
     await interaction.response.send_message("✅ Shift canceled and attendees notified.", ephemeral=True)
 
 
+# ---------- /shiftstop (Supervisor) ----------
+@tree.command(
+    name="shiftstop",
+    description="Announce that a shift is over (no pings).",
+    guild=discord.Object(id=GUILD_ID),
+)
+@app_commands.describe(
+    message_id_or_link="Message ID or link of the original shift announcement."
+)
+@app_commands.checks.has_role(SUPERVISOR_ROLE_ID)
+@app_commands.guild_only()
+async def shiftstop_cmd(
+    interaction: discord.Interaction,
+    message_id_or_link: str,
+):
+    # Validate message id
+    try:
+        target_id = _resolve_message_id(message_id_or_link)
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return
+
+    info = SHIFT_TRACK.get(target_id)
+    if not info:
+        await interaction.response.send_message("❌ I can't find a tracked shift with that message ID.", ephemeral=True)
+        return
+
+    channel = interaction.client.get_channel(info["channel_id"])
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message("❌ I can't access the original channel.", ephemeral=True)
+        return
+
+    # Build the "Shift Over" embed
+    header = "# Shift Over"
+    desc = "The shift has now concluded. Please wait to participate in the next shift."
+
+    embed = discord.Embed(
+        title="Shift Over",
+        description=desc,
+        color=discord.Color.dark_gray()
+    )
+    embed.set_footer(text=FOOTER_TEXT)
+
+    try:
+        orig_msg = await channel.fetch_message(target_id)
+        await orig_msg.reply(
+            content=header,   # no mentions/pings requested
+            embed=embed,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+        )
+    except discord.HTTPException:
+        await channel.send(
+            content=header,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+        )
+
+    await interaction.response.send_message("✅ Posted “Shift Over.”", ephemeral=True)
+
+
 # ---------- Main ----------
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
-
