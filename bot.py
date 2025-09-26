@@ -20,7 +20,7 @@ SUPERVISOR_ROLE_ID = 947288094804176957         # minimum role to run /shift
 # Guild/Channels/Emojis
 GUILD_ID = 882441222487162912
 SHIFTS_CHANNEL_ID = 1329659267963420703         # #shifts
-RUNS_NOTIFIED_ROLE_ID = 1392329893282578504     # @Runs Notified (or "run notifications")
+RUNS_NOTIFIED_ROLE_ID = 1332862724039774289     # @Runs Notified (or "run notifications")
 
 # If :net: is a custom emoji, set the full tag like "<:net:123456789012345678>"
 # If it's a standard Unicode emoji, you can put the emoji itself here.
@@ -693,3 +693,4 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
