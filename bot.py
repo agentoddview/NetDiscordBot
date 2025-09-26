@@ -437,7 +437,7 @@ async def shift_cmd(
 
     # Footer with extra italic line
     embed.set_footer(
-        text=f"{FOOTER_TEXT}\n\n*You must react with the emoji if you want to be notified.*"
+        text=f"{FOOTER_TEXT}\n\nYou must react with the emoji if you want to be notified."
     )
 
     # Post to #shifts with role ping OUTSIDE the embed
@@ -502,3 +502,4 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
+
