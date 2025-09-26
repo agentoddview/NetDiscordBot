@@ -23,7 +23,7 @@ RUNS_NOTIFIED_ROLE_ID = 1392329893282578504     # @Runs Notified (or "run notifi
 
 # If :net: is a custom emoji, set the full tag like "<:net:123456789012345678>"
 # If it's a standard Unicode emoji, you can put the emoji itself here.
-NET_EMOJI = "<:net:1323882053858492437>"  # <-- REPLACE with your :net: (e.g., "<:net:123456789012345678>")
+NET_EMOJI = "<:net:1323882053858492437>"
 DEFAULT_TZ = "America/New_York"                 # MBTA/WRTA locale
 
 # ---------- Footer text ----------
@@ -79,14 +79,12 @@ def has_lead_supervisor_role(member: discord.Member) -> bool:
 
 # ---------- Time helpers for /shift ----------
 def _fmt_date(dt: datetime) -> str:
-    # Example: Thursday September 25, 2025  (Windows safe)
     try:
         return dt.strftime("%A %B %-d, %Y")
     except ValueError:
         return dt.strftime("%A %B %#d, %Y")
 
 def _fmt_time(dt: datetime) -> str:
-    # Example: 4:00 PM  (Windows safe)
     try:
         return dt.strftime("%-I:%M %p")
     except ValueError:
@@ -101,20 +99,13 @@ def _ts(dt: datetime, style: str = "R") -> str:
 def parse_time_to_dt(time_str: str, tz_name: str = DEFAULT_TZ) -> datetime:
     """
     Accepts friendly inputs and returns a tz-aware datetime in tz_name.
-    Supported examples:
-      - "2025-09-23 16:00"
-      - "2025/09/23 4:00 PM"
-      - "Tue 9/23/2025 16:00"
-      - "9/23 4:00 PM"           (assumes current year)
-      - "today 4:00 PM"
-      - "tomorrow 16:00"
-      - "4:00 PM"                (assumes today, else tomorrow if already passed)
+    Examples:
+      "2025-09-23 16:00", "9/23 4:00 PM", "today 4:00 PM", "tomorrow 16:00", "4:00 PM"
     """
     tz = ZoneInfo(tz_name)
     now = datetime.now(tz)
     s = time_str.strip().lower()
 
-    # Keywords today/tomorrow + time
     if s.startswith("today ") or s == "today":
         t = s.replace("today", "").strip()
         if not t:
@@ -122,8 +113,7 @@ def parse_time_to_dt(time_str: str, tz_name: str = DEFAULT_TZ) -> datetime:
         for p in ["%I:%M %p", "%H:%M"]:
             try:
                 t_naive = datetime.strptime(t, p)
-                dt = datetime(now.year, now.month, now.day, t_naive.hour, t_naive.minute, tzinfo=tz)
-                return dt
+                return datetime(now.year, now.month, now.day, t_naive.hour, t_naive.minute, tzinfo=tz)
             except ValueError:
                 pass
         raise ValueError(f"Could not parse time in '{time_str}'. Try 'today 4:00 PM'.")
@@ -135,14 +125,13 @@ def parse_time_to_dt(time_str: str, tz_name: str = DEFAULT_TZ) -> datetime:
         for p in ["%I:%M %p", "%H:%M"]:
             try:
                 t_naive = datetime.strptime(t, p)
-                next_day = now + timedelta(days=1)
-                dt = datetime(next_day.year, next_day.month, next_day.day, t_naive.hour, t_naive.minute, tzinfo=tz)
-                return dt
+                nd = now + timedelta(days=1)
+                return datetime(nd.year, nd.month, nd.day, t_naive.hour, t_naive.minute, tzinfo=tz)
             except ValueError:
                 pass
         raise ValueError(f"Could not parse time in '{time_str}'. Try 'tomorrow 4:00 PM'.")
 
-    # Time-only → today or tomorrow if already passed
+    # Time-only → today (or tomorrow if already passed)
     for p in ["%I:%M %p", "%H:%M"]:
         try:
             t_naive = datetime.strptime(s, p)
@@ -279,6 +268,70 @@ async def reloadcsv_cmd(interaction: discord.Interaction):
     await interaction.response.send_message("🔄 CSV reloaded.", ephemeral=True)
 
 
+# ---------- FOLLOW-UP TASK (define BEFORE /shift) ----------
+async def schedule_run_followup(bot: commands.Bot, message_id: int):
+    """Runs at the scheduled time; posts the RUN follow-up."""
+    info = SHIFT_TRACK.get(message_id)
+    if not info:
+        print(f"[shift] followup: message {message_id} not found in tracker")
+        return
+
+    when: datetime = info["when"]
+    channel = bot.get_channel(info["channel_id"])
+    host_id = info.get("host_id")
+
+    if not isinstance(channel, discord.TextChannel):
+        print(f"[shift] followup: channel missing for message {message_id}")
+        return
+
+    # Wait until time (guard negatives)
+    delta = (when - datetime.now(when.tzinfo)).total_seconds()
+    if delta > 0:
+        print(f"[shift] followup: sleeping {int(delta)}s for message {message_id}")
+        await asyncio.sleep(delta)
+    else:
+        print(f"[shift] followup: time already passed by {-int(delta)}s; posting now for message {message_id}")
+
+    # Build attendee list from reactions we tracked
+    reactors = info.get("reactors", set())
+    attendee_line = "| |" if not reactors else f"| {' '.join(f'<@{uid}>' for uid in reactors)} |"
+
+    # Follow-up embed
+    join_text = "[THIS](https://www.netransit.net/shift)"
+    desc = (
+        f"Please use {join_text} link to join. "
+        "Console use `/joinshift` in the game hub. "
+        "If you have any problems joining, ping the host."
+    )
+    embed = discord.Embed(color=discord.Color.blurple(), description=desc)
+    embed.add_field(name="Attendees", value=attendee_line, inline=False)
+
+    # Content: pings + markdown title OUTSIDE the embed
+    content_lines = [f"<@&{RUNS_NOTIFIED_ROLE_ID}>"]
+    if host_id:
+        content_lines.append(f"<@{host_id}>")
+    content_lines.append("# **RUN**")
+    content = "\n".join(content_lines)
+
+    try:
+        orig_msg = await channel.fetch_message(message_id)
+        await orig_msg.reply(
+            content=content,
+            embed=embed,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
+        )
+        print(f"[shift] followup: posted reply under {message_id}")
+    except discord.HTTPException as e:
+        await channel.send(
+            content=content,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
+        )
+        print(f"[shift] followup: posted new msg in channel (reply failed): {e}")
+
+
+# ---------- /shift (Supervisor) ----------
 @tree.command(
     name="shift",
     description="Create a shift announcement for MBTA/WRTA and track attendees via :net: reaction.",
@@ -318,15 +371,11 @@ async def shift_cmd(
     epoch = _epoch(when)
 
     # Location field
-    if game_name == "MBTA":
-        loc_value = f"{game_name} <:mbtalogo:1054907034505584747>"
-    else:
-        loc_value = game_name
+    loc_value = f"{game_name} <:mbtalogo:1054907034505584747>" if game_name == "MBTA" else game_name
 
     # Build announcement embed (cleaner + pure timestamps)
     embed = discord.Embed(color=discord.Color.brand_green())
     embed.title = "!RUN!"
-    # (Removed the old 'MBTA: Run' line.)
     embed.add_field(name="Location", value=loc_value, inline=True)
     embed.add_field(name="Time", value=f"<t:{epoch}:T> (<t:{epoch}:R>)", inline=True)
     embed.add_field(name="Date", value=f"<t:{epoch}:D>", inline=False)
@@ -365,7 +414,9 @@ async def shift_cmd(
         "host_id": interaction.user.id,
     }
 
+    print(f"[shift] scheduled followup at {when.isoformat()} for message {posted_msg.id}")
     asyncio.create_task(schedule_run_followup(bot, posted_msg.id))
+
 
 # ---------- Reaction tracker for /shift ----------
 @bot.event
@@ -396,7 +447,3 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
-
-
-
-
