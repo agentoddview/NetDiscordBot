@@ -39,21 +39,19 @@ def load_results_csv(path: str = CSV_PATH):
         return data
     with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            data[row["Username"].strip().lower()] = {
+            data[row["UserID"].strip()] = {
                 "Result": row.get("Result", "").strip(),
                 "Feedback": row.get("Feedback", "").strip(),
             }
     return data
 
+
 def save_results_csv(data: dict, path: str = CSV_PATH):
     with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["Username", "Result", "Feedback"])
+        w = csv.DictWriter(f, fieldnames=["UserID", "Result", "Feedback"])
         w.writeheader()
-        for username, v in data.items():
-            w.writerow({"Username": username, "Result": v.get("Result", ""), "Feedback": v.get("Feedback", "")})
-
-RESULTS = load_results_csv()
-
+        for uid, v in data.items():
+            w.writerow({"UserID": uid, "Result": v.get("Result", ""), "Feedback": v.get("Feedback", "")})
 
 # ---------- Utilities ----------
 def possible_keys_for_user(user: discord.abc.User):
@@ -200,13 +198,14 @@ async def on_ready():
 @tree.command(name="result", description="DMs you your application result.", guild=discord.Object(id=GUILD_ID))
 async def result_cmd(interaction: discord.Interaction):
     user = interaction.user
-    found_key = next((k for k in possible_keys_for_user(user) if k in RESULTS), None)
-    if not found_key:
-        await interaction.response.send_message("❌ Results unavailable (name not found or request window expired).")
+    user_id = str(user.id)
+
+    if user_id not in RESULTS:
+        await interaction.response.send_message("❌ Results unavailable (ID not found or request window expired).", ephemeral=True)
         return
 
-    outcome = RESULTS[found_key]["Result"]
-    feedback = RESULTS[found_key]["Feedback"]
+    outcome = RESULTS[user_id]["Result"]
+    feedback = RESULTS[user_id]["Feedback"]
 
     embed = discord.Embed(
         title=f"Your application was {outcome}",
@@ -217,9 +216,9 @@ async def result_cmd(interaction: discord.Interaction):
 
     try:
         await user.send(embed=embed)
-        await interaction.response.send_message("✅ Results sent to your DMs.")
+        await interaction.response.send_message("✅ Results sent to your DMs.", ephemeral=True)
     except discord.Forbidden:
-        await interaction.response.send_message("❌ I could not DM you. Please enable DMs from server members and try again.")
+        await interaction.response.send_message("❌ I could not DM you. Please enable DMs from server members and try again.", ephemeral=True)
 
 
 # ---------- /add (Lead Supervisor) ----------
@@ -240,8 +239,9 @@ async def add_cmd(
         await interaction.response.send_message("❌ You do not have permission to use /add.", ephemeral=True)
         return
 
-    username_key = (user.name or user.display_name or str(user)).strip().lower()
-    RESULTS[username_key] = {"Result": decision, "Feedback": feedback}
+    user_id = str(user.id)
+    RESULTS[user_id] = {"Result": decision, "Feedback": feedback}
+
 
     try:
         save_results_csv(RESULTS)
@@ -693,6 +693,3 @@ if __name__ == "__main__":
     if not token:
         raise RuntimeError("DISCORD_TOKEN environment variable not set.")
     bot.run(token)
-
-
-
