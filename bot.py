@@ -32,14 +32,30 @@ FOOTER_TEXT = "More questions or concerns? Please open a ticket inside the New E
 # =================================================
 
 
-# ---------- CSV helpers ----------
+# ---------- CSV helpers (now keyed by Discord UserID) ----------
 def load_results_csv(path: str = CSV_PATH):
+    """
+    Expected columns:
+      - UserID (string of the Discord user's numeric ID)
+      - Result
+      - Feedback
+    """
     data = {}
     if not os.path.exists(path):
         return data
+
     with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            data[row["UserID"].strip()] = {
+        reader = csv.DictReader(f)
+        # Back-compat: accept either UserID or Username columns, but we only *use* UserID lookups.
+        for row in reader:
+            if "UserID" in row and row["UserID"].strip():
+                key = row["UserID"].strip()
+            else:
+                # If an old CSV has only Username, keep a non-ID key so /reloadcsv doesn’t crash.
+                # NOTE: /result now uses ID only, so legacy rows won’t be found.
+                key = row.get("Username", "").strip().lower()
+
+            data[key] = {
                 "Result": row.get("Result", "").strip(),
                 "Feedback": row.get("Feedback", "").strip(),
             }
@@ -50,18 +66,21 @@ def save_results_csv(data: dict, path: str = CSV_PATH):
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["UserID", "Result", "Feedback"])
         w.writeheader()
-        for uid, v in data.items():
-            w.writerow({"UserID": uid, "Result": v.get("Result", ""), "Feedback": v.get("Feedback", "")})
+        for key, v in data.items():
+            # Only write rows that look like real IDs (digits). Skip legacy username keys.
+            if not str(key).isdigit():
+                continue
+            w.writerow({
+                "UserID": str(key),
+                "Result": v.get("Result", ""),
+                "Feedback": v.get("Feedback", "")
+            })
+
+
+RESULTS = load_results_csv()
+
 
 # ---------- Utilities ----------
-def possible_keys_for_user(user: discord.abc.User):
-    keys = {str(user).strip().lower()}
-    if getattr(user, "name", None): keys.add(user.name.strip().lower())
-    if getattr(user, "global_name", None): keys.add(user.global_name.strip().lower())
-    disp = getattr(user, "display_name", None)
-    if disp: keys.add(disp.strip().lower())
-    return keys
-
 def color_for_decision(decision: str) -> discord.Color:
     d = (decision or "").lower()
     if d == "accepted":
@@ -71,6 +90,7 @@ def color_for_decision(decision: str) -> discord.Color:
     if d == "blacklisted":
         return discord.Color(0x000000)  # black
     return discord.Color.blurple()
+
 
 def has_lead_supervisor_role(member: discord.Member) -> bool:
     return any(r.id == LEAD_SUPERVISOR_ROLE_ID for r in member.roles) or member.guild_permissions.administrator
@@ -83,17 +103,21 @@ def _fmt_date(dt: datetime) -> str:
     except ValueError:
         return dt.strftime("%A %B %#d, %Y")
 
+
 def _fmt_time(dt: datetime) -> str:
     try:
         return dt.strftime("%-I:%M %p")
     except ValueError:
         return dt.strftime("%#I:%M %p")
 
+
 def _epoch(dt: datetime) -> int:
     return int(dt.timestamp())
 
+
 def _ts(dt: datetime, style: str = "R") -> str:
     return f"<t:{_epoch(dt)}:{style}>"
+
 
 def parse_time_to_dt(time_str: str, tz_name: str = DEFAULT_TZ) -> datetime:
     """
@@ -194,14 +218,17 @@ async def on_ready():
         print("Slash command sync error:", e)
 
 
-# ---------- /result ----------
+# ---------- /result (now uses UserID) ----------
 @tree.command(name="result", description="DMs you your application result.", guild=discord.Object(id=GUILD_ID))
 async def result_cmd(interaction: discord.Interaction):
     user = interaction.user
     user_id = str(user.id)
 
     if user_id not in RESULTS:
-        await interaction.response.send_message("❌ Results unavailable (ID not found or request window expired).", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ Results unavailable (ID not found or request window expired).",
+            ephemeral=True
+        )
         return
 
     outcome = RESULTS[user_id]["Result"]
@@ -218,7 +245,10 @@ async def result_cmd(interaction: discord.Interaction):
         await user.send(embed=embed)
         await interaction.response.send_message("✅ Results sent to your DMs.", ephemeral=True)
     except discord.Forbidden:
-        await interaction.response.send_message("❌ I could not DM you. Please enable DMs from server members and try again.", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ I could not DM you. Please enable DMs from server members and try again.",
+            ephemeral=True
+        )
 
 
 # ---------- /add (Lead Supervisor) ----------
@@ -241,7 +271,6 @@ async def add_cmd(
 
     user_id = str(user.id)
     RESULTS[user_id] = {"Result": decision, "Feedback": feedback}
-
 
     try:
         save_results_csv(RESULTS)
