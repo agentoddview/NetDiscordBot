@@ -31,6 +31,14 @@ DEFAULT_TZ = "America/New_York"                 # MBTA/WRTA locale
 FOOTER_TEXT = "More questions or concerns? Please open a ticket inside the New England Transit Discord Server."
 # =================================================
 
+from pathlib import Path
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(usecwd=False) or (Path(__file__).parent / ".env"))
+
+import os
+TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN environment variable not set.")
 
 # ---------- CSV helpers ----------
 def load_results_csv(path: str = CSV_PATH):
