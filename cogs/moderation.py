@@ -589,7 +589,7 @@ class Moderation(commands.Cog):
 
         await interaction.followup.send(embed=embed, view=view)
 
-    @app_commands.command(
+        @app_commands.command(
         name="editmoderation",
         description="Edit a logged moderation case.",
     )
@@ -616,6 +616,39 @@ class Moderation(commands.Cog):
                 "This command can only be used in a server.",
                 ephemeral=True,
             )
+            return
+
+        row = self._get_moderation_case(guild.id, case_id)
+        if not row:
+            await interaction.response.send_message(
+                f"❌ Case `#{case_id}` does not exist in this server.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"Pending Edit – Case #{case_id}",
+            description=f"Target: **{row['target_username']}** ({row['target_roblox_id']})",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Current Punishment", value=row["punishment"], inline=True)
+        embed.add_field(name="New Punishment", value=punishment.value, inline=True)
+        embed.add_field(name="Current Reason", value=row["reason"], inline=False)
+        embed.add_field(name="New Reason", value=reason, inline=False)
+
+        data = {
+            "guild_id": guild.id,
+            "case_id": case_id,
+            "new_punishment": punishment.value,
+            "new_reason": reason,
+        }
+        view = EditModerationConfirmView(self, data)
+
+        await interaction.response.send_message(
+            embed=embed,
+            view=view,
+            ephemeral=True,
+        )
             return
 
         row = self._get_moderation_case(guild.id, case_id)
