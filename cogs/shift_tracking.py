@@ -12,6 +12,7 @@ GUILD_ID = 882441222487162912  # NE Transit guild
 SUPERVISOR_ROLE_ID = 947288094804176957          # "Supervisor"
 SENIOR_SUPERVISOR_ROLE_ID = 1393088300239159467  # can use /clockadmin + /clockadjust
 LEAD_SUPERVISOR_ROLE_ID = 1351333124965142600    # can use /clockreset
+ONLINE_ROLE_ID = 1392996333073203211             # in-game online role
 
 # Quota threshold (seconds)
 WEEKLY_QUOTA_SECONDS = 4 * 60 * 60  # 4 hours
@@ -77,7 +78,7 @@ class ClockAdminView(discord.ui.View):
 
 
 class ClockManageView(discord.ui.View):
-    """Shift management panel for a single user: Start / Pause / End."""
+    """Shift management panel for a single user: Start / End."""
 
     def __init__(self, cog: "ShiftTracking", member: discord.Member):
         super().__init__(timeout=300)
@@ -119,20 +120,6 @@ class ClockManageView(discord.ui.View):
         ok, msg = self.cog._start_shift(self.guild_id, self.member_id)
         if not ok:
             await interaction.response.send_message(msg, ephemeral=True)
-            return
-        await self._refresh_embed(interaction)
-
-    @discord.ui.button(label="Pause", style=discord.ButtonStyle.secondary)
-    async def pause_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        if not await self._check_owner(interaction):
-            return
-        ok, _ = self.cog._end_shift(self.guild_id, self.member_id)
-        if not ok:
-            await interaction.response.send_message(
-                "You don't have an active clock to pause.", ephemeral=True
-            )
             return
         await self._refresh_embed(interaction)
 
@@ -381,6 +368,44 @@ class ShiftTracking(commands.Cog):
             name="Shift Type", value="Supervisor Shifts", inline=False
         )
         return embed
+
+    # ---------- presence → online role ----------
+
+    @commands.Cog.listener()
+    async def on_presence_update(
+        self, before: discord.Member, after: discord.Member
+    ):
+        """
+        Give/remove the 'in-game online' role based on Discord presence.
+        - If status is online -> add role
+        - Otherwise -> remove role
+        """
+        # Only care about our main guild
+        if after.guild is None or after.guild.id != GUILD_ID:
+            return
+        if after.bot:
+            return
+
+        role = after.guild.get_role(ONLINE_ROLE_ID)
+        if role is None:
+            return  # role not found; silently ignore
+
+        try:
+            if after.status is discord.Status.online:
+                if role not in after.roles:
+                    await after.add_roles(
+                        role,
+                        reason="In-game online role (status online)",
+                    )
+            else:
+                if role in after.roles:
+                    await after.remove_roles(
+                        role,
+                        reason="In-game online role (status not online)",
+                    )
+        except discord.Forbidden:
+            # Missing permissions to edit roles; nothing we can do
+            pass
 
     # ---------- slash commands ----------
 
@@ -674,7 +699,7 @@ class ShiftTracking(commands.Cog):
 
     @app_commands.command(
         name="clockmanage",
-        description="Open your shift management panel (Start / Pause / End).",
+        description="Open your shift management panel (Start / End).",
     )
     @app_commands.guild_only()
     async def clockmanage(self, interaction: discord.Interaction):
