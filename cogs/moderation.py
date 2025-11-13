@@ -127,16 +127,16 @@ class Moderation(commands.Cog):
 
     # ---------- helpers: Roblox API ----------
 
-    async def _fetch_roblox_user(self, query: str):
+        async def _fetch_roblox_user(self, query: str):
         """
         Accepts either a Roblox user ID (digits) or username.
-        Returns dict: {id, name, displayName, created, thumbnail_url} or None.
+        Returns dict: {id, name, displayName, created, thumbnail_url, profile_url} or None.
         """
         async with aiohttp.ClientSession() as session:
+            # 1) Resolve username -> ID if needed
             if query.isdigit():
                 user_id = int(query)
             else:
-                # username -> id
                 url = "https://users.roblox.com/v1/usernames/users"
                 payload = {"usernames": [query], "excludeBannedUsers": False}
                 async with session.post(url, json=payload) as resp:
@@ -147,7 +147,7 @@ class Moderation(commands.Cog):
                         return None
                     user_id = data["data"][0]["id"]
 
-            # now fetch user details
+            # 2) Fetch user details
             async with session.get(
                 f"https://users.roblox.com/v1/users/{user_id}"
             ) as resp:
@@ -155,11 +155,26 @@ class Moderation(commands.Cog):
                     return None
                 info = await resp.json()
 
-            # avatar headshot
-            thumb_url = (
-                "https://www.roblox.com/headshot-thumbnail/image"
-                f"?userId={user_id}&width=420&height=420&format=png"
+            # 3) Fetch a proper avatar headshot URL from thumbnails API
+            thumb_url = None
+            thumb_api = (
+                "https://thumbnails.roblox.com/v1/users/avatar-headshot"
+                f"?userIds={user_id}&size=420x420&format=Png&isCircular=false"
             )
+            async with session.get(thumb_api) as resp:
+                if resp.status == 200:
+                    tdata = await resp.json()
+                    if tdata.get("data"):
+                        thumb_url = tdata["data"][0].get("imageUrl")
+
+            # Fallback to classic headshot-thumbnail URL if thumbnails API fails
+            if not thumb_url:
+                thumb_url = (
+                    "https://www.roblox.com/headshot-thumbnail/image"
+                    f"?userId={user_id}&width=420&height=420&format=png"
+                )
+
+            profile_url = f"https://www.roblox.com/users/{user_id}/profile"
 
             return {
                 "id": str(user_id),
@@ -167,24 +182,8 @@ class Moderation(commands.Cog):
                 "displayName": info.get("displayName") or "",
                 "created": info.get("created") or "",
                 "thumbnail_url": thumb_url,
+                "profile_url": profile_url,
             }
-
-    def _get_previous_moderations(
-        self, guild_id: int, roblox_id: str, limit: int = 5
-    ) -> List[sqlite3.Row]:
-        with get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT *
-                FROM moderations
-                WHERE guild_id = ? AND target_roblox_id = ?
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (guild_id, roblox_id, limit),
-            )
-            return cur.fetchall()
 
     # ---------- helpers: core logic ----------
 
