@@ -38,7 +38,7 @@ def init_db():
         )
     """)
 
-    # Settings table
+    # Guild settings: all channels
     cur.execute("""
         CREATE TABLE IF NOT EXISTS guild_settings (
             guild_id INTEGER PRIMARY KEY,
@@ -47,8 +47,7 @@ def init_db():
             loa_channel_id INTEGER
         )
     """)
-
-    # Add columns if the user didn't have them before
+    # Add missing columns if coming from an older version
     cur.execute("PRAGMA table_info(guild_settings)")
     cols = {row["name"] for row in cur.fetchall()}
     if "botlog_channel_id" not in cols:
@@ -56,7 +55,7 @@ def init_db():
     if "loa_channel_id" not in cols:
         cur.execute("ALTER TABLE guild_settings ADD COLUMN loa_channel_id INTEGER")
 
-    # Clock stuff
+    # Clock periods: last reset for each guild (for weekly quotas)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clock_periods (
             guild_id INTEGER PRIMARY KEY,
@@ -64,12 +63,27 @@ def init_db():
         )
     """)
 
+    # Manual adjustments to clock time (per period)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clock_adjustments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             guild_id INTEGER NOT NULL,
             seconds INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    # Moderation log (Roblox centric)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS moderations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            moderator_id INTEGER NOT NULL,
+            target_roblox_id TEXT NOT NULL,
+            target_username TEXT,
+            punishment TEXT NOT NULL,
+            reason TEXT NOT NULL,
             created_at TEXT NOT NULL
         )
     """)
