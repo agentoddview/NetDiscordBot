@@ -8,63 +8,59 @@ GUILD_ID = 882441222487162912  # NE Transit guild
 
 
 class NetConfig(commands.Cog):
-    """Configuration for Net bot channels (mod log, bot log)."""
+    """Configure all Net bot channels in one command."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         init_db()
 
-    def _get_settings(self, guild_id: int) -> dict:
+    def _get_settings(self, guild_id: int):
         with get_connection() as conn:
             cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT modlog_channel_id, botlog_channel_id
+            cur.execute("""
+                SELECT modlog_channel_id, botlog_channel_id, loa_channel_id
                 FROM guild_settings WHERE guild_id = ?
-                """,
-                (guild_id,),
-            )
+            """, (guild_id,))
             row = cur.fetchone()
-        if not row:
-            return {"modlog_channel_id": None, "botlog_channel_id": None}
-        return {
-            "modlog_channel_id": row["modlog_channel_id"],
-            "botlog_channel_id": row["botlog_channel_id"],
-        }
 
-    def _save_settings(
-        self,
-        guild_id: int,
-        modlog_channel_id: int | None,
-        botlog_channel_id: int | None,
-    ):
-        current = self._get_settings(guild_id)
-        if modlog_channel_id is None:
-            modlog_channel_id = current["modlog_channel_id"]
-        if botlog_channel_id is None:
-            botlog_channel_id = current["botlog_channel_id"]
+        if not row:
+            return {
+                "modlog_channel_id": None,
+                "botlog_channel_id": None,
+                "loa_channel_id": None
+            }
+        return dict(row)
+
+    def _save(self, guild_id: int, mod, bot, loa):
+        existing = self._get_settings(guild_id)
+
+        if mod is None:
+            mod = existing["modlog_channel_id"]
+        if bot is None:
+            bot = existing["botlog_channel_id"]
+        if loa is None:
+            loa = existing["loa_channel_id"]
 
         with get_connection() as conn:
             cur = conn.cursor()
-            cur.execute(
-                """
-                INSERT INTO guild_settings (guild_id, modlog_channel_id, botlog_channel_id)
-                VALUES (?, ?, ?)
+            cur.execute("""
+                INSERT INTO guild_settings (guild_id, modlog_channel_id, botlog_channel_id, loa_channel_id)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                     modlog_channel_id = excluded.modlog_channel_id,
-                    botlog_channel_id = excluded.botlog_channel_id
-                """,
-                (guild_id, modlog_channel_id, botlog_channel_id),
-            )
+                    botlog_channel_id = excluded.botlog_channel_id,
+                    loa_channel_id = excluded.loa_channel_id
+            """, (guild_id, mod, bot, loa))
             conn.commit()
 
     @app_commands.command(
         name="netconfig",
-        description="Configure Net bot channels (mod logs, bot logs).",
+        description="Configure Net bot channels."
     )
     @app_commands.describe(
-        modlog_channel="Channel for moderation logs (joins, deletions, etc.).",
-        botlog_channel="Channel for Net bot logs (LOAs, approvals, etc.).",
+        modlog_channel="Channel for moderation logs",
+        botlog_channel="Channel for general bot logs",
+        loa_channel="Channel where LOA approval feed messages go"
     )
     @app_commands.guild_only()
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -73,38 +69,32 @@ class NetConfig(commands.Cog):
         interaction: discord.Interaction,
         modlog_channel: discord.TextChannel | None = None,
         botlog_channel: discord.TextChannel | None = None,
+        loa_channel: discord.TextChannel | None = None,
     ):
         guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "This command can only be used in a server.", ephemeral=True
-            )
-            return
-
-        self._save_settings(
+        self._save(
             guild.id,
             modlog_channel.id if modlog_channel else None,
             botlog_channel.id if botlog_channel else None,
+            loa_channel.id if loa_channel else None,
         )
 
         settings = self._get_settings(guild.id)
-        def _mention(cid: int | None):
-            if not cid:
-                return "`Not set`"
-            ch = guild.get_channel(cid)
-            return ch.mention if ch else f"`#{cid}`"
+
+        def m(c): 
+            return guild.get_channel(c).mention if c else "`Not set`"
 
         await interaction.response.send_message(
-            "✅ **Net bot configuration updated.**\n"
-            f"• Mod log channel: {_mention(settings['modlog_channel_id'])}\n"
-            f"• Bot log channel: {_mention(settings['botlog_channel_id'])}",
-            ephemeral=True,
+            "### ✅ Net Bot Configuration Updated\n"
+            f"**Mod Log:** {m(settings['modlog_channel_id'])}\n"
+            f"**Generic Bot Log:** {m(settings['botlog_channel_id'])}\n"
+            f"**LOA Feed:** {m(settings['loa_channel_id'])}",
+            ephemeral=True
         )
 
 
 async def setup(bot: commands.Bot):
     cog = NetConfig(bot)
     await bot.add_cog(cog)
-
     guild = discord.Object(id=GUILD_ID)
     bot.tree.add_command(cog.netconfig, guild=guild)
