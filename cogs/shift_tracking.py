@@ -1,4 +1,3 @@
-# cogs/shift_tracking.py
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -8,7 +7,14 @@ from typing import List
 from database import get_connection, init_db
 
 GUILD_ID = 882441222487162912  # NE Transit guild
-SENIOR_SUPERVISOR_ROLE_ID = 1393088300239159467  # can use /clockadmin
+
+# Roles
+SUPERVISOR_ROLE_ID = 947288094804176957          # "Supervisor"
+SENIOR_SUPERVISOR_ROLE_ID = 1393088300239159467  # can use /clockadmin + /clockadjust
+LEAD_SUPERVISOR_ROLE_ID = 1351333124965142600    # can use /clockreset
+
+# Quota threshold (seconds)
+WEEKLY_QUOTA_SECONDS = 4 * 60 * 60  # 4 hours
 
 
 class ClockAdminView(discord.ui.View):
@@ -33,8 +39,7 @@ class ClockAdminView(discord.ui.View):
                 )
             )
 
-        # If somehow there are >25 open shifts, Discord max is 25 options.
-        options = options[:25]
+        options = options[:25]  # Discord select max
 
         select = discord.ui.Select(
             placeholder="Select a user to end their clock",
@@ -46,7 +51,7 @@ class ClockAdminView(discord.ui.View):
         self.add_item(select)
 
     async def on_select(self, interaction: discord.Interaction):
-        user_id = int(self.children[0].values[0])  # value of selected option
+        user_id = int(self.children[0].values[0])
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message(
@@ -63,7 +68,7 @@ class ClockAdminView(discord.ui.View):
 
         await interaction.response.send_message(
             f"⏱ Ended clock for <@{user_id}>.\n"
-            f"Duration: **{duration}**",
+            f"Duration this shift: **{duration}**",
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions(
                 users=True, roles=False, everyone=False
@@ -78,11 +83,11 @@ class ShiftTracking(commands.Cog):
         self.bot = bot
         init_db()  # ensure tables exist
 
-    # ---------- helpers ----------
+    # ---------- helpers: formatting ----------
 
     @staticmethod
     def _format_duration(seconds: int) -> str:
-        minutes, sec = divmod(seconds, 60)
+        minutes, sec = divmod(max(0, seconds), 60)
         hours, minutes = divmod(minutes, 60)
         parts = []
         if hours:
@@ -92,6 +97,8 @@ class ShiftTracking(commands.Cog):
         if sec or not parts:
             parts.append(f"{sec}s")
         return " ".join(parts)
+
+    # ---------- helpers: DB access ----------
 
     def _get_open_shift(self, guild_id: int, user_id: int):
         with get_connection() as conn:
@@ -107,9 +114,7 @@ class ShiftTracking(commands.Cog):
             return cur.fetchone()
 
     def _end_shift(self, guild_id: int, user_id: int):
-        """
-        End the user's own shift, returns (ok, duration_str or None).
-        """
+        """End a user's current shift. Returns (ok, duration_str or None)."""
         row = self._get_open_shift(guild_id, user_id)
         if not row:
             return False, None
@@ -130,105 +135,76 @@ class ShiftTracking(commands.Cog):
         return True, duration_str
 
     def _force_end_shift(self, guild_id: int, user_id: int):
-        """
-        Admin version of end_shift; same as _end_shift but separate for clarity.
-        """
+        """Admin version of end_shift (same logic, separated for clarity)."""
         return self._end_shift(guild_id, user_id)
 
-    # ---------- Slash commands ----------
+    # ----- weekly period helpers -----
 
-    @app_commands.command(
-        name="startclock",
-        description="Start your staff clock for the current server.",
-    )
-    @app_commands.guild_only()
-    async def startclock(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "This command can only be used in a server.",
-                ephemeral=True,
+    def _get_reset_time(self, guild_id: int) -> datetime:
+        """Return the start of the current period for this guild."""
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT reset_at FROM clock_periods WHERE guild_id = ?",
+                (guild_id,),
             )
-            return
+            row = cur.fetchone()
 
-        user = interaction.user
+        if row and row["reset_at"]:
+            return datetime.fromisoformat(row["reset_at"])
 
-        if self._get_open_shift(guild.id, user.id):
-            await interaction.response.send_message(
-                "⏱ You already have an active clock. Use `/endclock` first.",
-                ephemeral=True,
-            )
-            return
+        # Default: very old time so everything counts until first reset
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-        now = datetime.now(timezone.utc).isoformat()
+    def _set_reset_time(self, guild_id: int, when: datetime):
         with get_connection() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
-                INSERT INTO shifts (user_id, guild_id, start_time)
-                VALUES (?, ?, ?)
+                INSERT INTO clock_periods (guild_id, reset_at)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    reset_at = excluded.reset_at
                 """,
-                (user.id, guild.id, now),
+                (guild_id, when.isoformat()),
             )
             conn.commit()
 
-        local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        await interaction.response.send_message(
-            f"✅ Your clock has started at **{local}**.",
-            ephemeral=True,
-        )
-
-    @app_commands.command(
-        name="endclock",
-        description="End your current staff clock and see your duration.",
-    )
-    @app_commands.guild_only()
-    async def endclock(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "This command can only be used in a server.",
-                ephemeral=True,
+    def _get_adjustment_seconds(
+        self, guild_id: int, user_id: int, since: datetime
+    ) -> int:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(seconds), 0) AS total
+                FROM clock_adjustments
+                WHERE guild_id = ?
+                  AND user_id = ?
+                  AND created_at >= ?
+                """,
+                (guild_id, user_id, since.isoformat()),
             )
-            return
+            row = cur.fetchone()
+        return int(row["total"] if row and row["total"] is not None else 0)
 
-        ok, duration_str = self._end_shift(guild.id, interaction.user.id)
-        if not ok:
-            await interaction.response.send_message(
-                "❌ You do not have an active clock. Use `/startclock` first.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message(
-            f"✅ Your clock has ended.\n⏱ Duration: **{duration_str}**",
-            ephemeral=True,
-        )
-
-    @app_commands.command(
-        name="clocktotal",
-        description="View total recorded clock time for yourself or another member.",
-    )
-    @app_commands.describe(
-        member="Optional: pick a member to view their total. Defaults to yourself."
-    )
-    @app_commands.guild_only()
-    async def clocktotal(
-        self,
-        interaction: discord.Interaction,
-        member: discord.Member | None = None,
+    def _add_adjustment(
+        self, guild_id: int, user_id: int, seconds: int, when: datetime
     ):
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "This command can only be used in a server.",
-                ephemeral=True,
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO clock_adjustments (user_id, guild_id, seconds, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (user_id, guild_id, seconds, when.isoformat()),
             )
-            return
+            conn.commit()
 
-        target = member or interaction.user
-        user_id = target.id
-
+    def _get_period_total_seconds(self, guild_id: int, user_id: int) -> int:
+        """Total clocked seconds for current period (shifts + adjustments)."""
+        period_start = self._get_reset_time(guild_id)
         now_dt = datetime.now(timezone.utc)
 
         with get_connection() as conn:
@@ -237,9 +213,11 @@ class ShiftTracking(commands.Cog):
                 """
                 SELECT start_time, end_time
                 FROM shifts
-                WHERE user_id = ? AND guild_id = ?
+                WHERE user_id = ?
+                  AND guild_id = ?
+                  AND start_time >= ?
                 """,
-                (user_id, guild.id),
+                (user_id, guild_id, period_start.isoformat()),
             )
             rows = cur.fetchall()
 
@@ -252,73 +230,9 @@ class ShiftTracking(commands.Cog):
                 end_dt = datetime.fromisoformat(row["end_time"])
             total_seconds += int((end_dt - start_dt).total_seconds())
 
-        duration_str = self._format_duration(total_seconds)
-        await interaction.response.send_message(
-            f"📊 Total clocked time for **{target.display_name}**: **{duration_str}**",
-            ephemeral=True,
+        total_seconds += self._get_adjustment_seconds(
+            guild_id, user_id, period_start
         )
+        return total_seconds
 
-    @app_commands.command(
-        name="clockadmin",
-        description="Open the clock admin panel to end active clocks.",
-    )
-    @app_commands.guild_only()
-    async def clockadmin(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "This command can only be used in a server.",
-                ephemeral=True,
-            )
-            return
-
-        # Permission check: Senior Supervisor role or Administrator
-        member = interaction.user
-        assert isinstance(member, discord.Member)
-        has_role = any(r.id == SENIOR_SUPERVISOR_ROLE_ID for r in member.roles)
-        if not (has_role or member.guild_permissions.administrator):
-            await interaction.response.send_message(
-                "❌ You must be a Senior Supervisor to use `/clockadmin`.",
-                ephemeral=True,
-            )
-            return
-
-        with get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT user_id, start_time
-                FROM shifts
-                WHERE guild_id = ? AND end_time IS NULL
-                ORDER BY start_time ASC
-                """,
-                (guild.id,),
-            )
-            rows = cur.fetchall()
-
-        if not rows:
-            await interaction.response.send_message(
-                "There are currently **no active clocks** in this server.",
-                ephemeral=True,
-            )
-            return
-
-        view = ClockAdminView(self, guild, rows)
-        await interaction.response.send_message(
-            "### Clock Admin Panel\n"
-            "Select a user below to end their active clock.\n"
-            "This menu is visible only to you.",
-            view=view,
-            ephemeral=True,
-        )
-
-
-async def setup(bot: commands.Bot):
-    cog = ShiftTracking(bot)
-    await bot.add_cog(cog)
-
-    guild = discord.Object(id=GUILD_ID)
-    bot.tree.add_command(cog.startclock, guild=guild)
-    bot.tree.add_command(cog.endclock, guild=guild)
-    bot.tree.add_command(cog.clocktotal, guild=guild)
-    bot.tree.add_command(cog.clockadmin, guild=guild)
+    # ---------- slash commands
