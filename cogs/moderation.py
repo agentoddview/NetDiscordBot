@@ -125,29 +125,48 @@ class Moderation(commands.Cog):
         if channel:
             await channel.send(embed=embed)
 
-    # ---------- helpers: Roblox API ----------
+      # ---------- helpers: Roblox API ----------
 
-        async def _fetch_roblox_user(self, query: str):
+    async def _fetch_roblox_user(self, query: str):
         """
-        Accepts either a Roblox user ID (digits) or username.
-        Returns dict: {id, name, displayName, created, thumbnail_url, profile_url} or None.
+        Accepts either a Roblox user ID (digits) or a username.
+        Returns dict:
+        {
+            id: str,
+            name: str,
+            displayName: str,
+            created: str,
+            thumbnail_url: str,
+            profile_url: str
+        }
+        or None if not found.
         """
         async with aiohttp.ClientSession() as session:
-            # 1) Resolve username -> ID if needed
+            # -------------------------
+            # 1) Username → User ID resolve
+            # -------------------------
             if query.isdigit():
                 user_id = int(query)
             else:
                 url = "https://users.roblox.com/v1/usernames/users"
-                payload = {"usernames": [query], "excludeBannedUsers": False}
+                payload = {
+                    "usernames": [query],
+                    "excludeBannedUsers": False
+                }
+
                 async with session.post(url, json=payload) as resp:
                     if resp.status != 200:
                         return None
                     data = await resp.json()
+
                     if not data.get("data"):
                         return None
+
                     user_id = data["data"][0]["id"]
 
-            # 2) Fetch user details
+            # -------------------------
+            # 2) Fetch core user details
+            # -------------------------
             async with session.get(
                 f"https://users.roblox.com/v1/users/{user_id}"
             ) as resp:
@@ -155,27 +174,37 @@ class Moderation(commands.Cog):
                     return None
                 info = await resp.json()
 
-            # 3) Fetch a proper avatar headshot URL from thumbnails API
+            # -------------------------
+            # 3) Fetch proper avatar headshot
+            #    (Roblox Thumbnails API)
+            # -------------------------
             thumb_url = None
             thumb_api = (
                 "https://thumbnails.roblox.com/v1/users/avatar-headshot"
                 f"?userIds={user_id}&size=420x420&format=Png&isCircular=false"
             )
+
             async with session.get(thumb_api) as resp:
                 if resp.status == 200:
                     tdata = await resp.json()
                     if tdata.get("data"):
                         thumb_url = tdata["data"][0].get("imageUrl")
 
-            # Fallback to classic headshot-thumbnail URL if thumbnails API fails
+            # If Roblox thumbnail API failed, fallback to legacy
             if not thumb_url:
                 thumb_url = (
                     "https://www.roblox.com/headshot-thumbnail/image"
                     f"?userId={user_id}&width=420&height=420&format=png"
                 )
 
+            # -------------------------
+            # 4) Profile URL
+            # -------------------------
             profile_url = f"https://www.roblox.com/users/{user_id}/profile"
 
+            # -------------------------
+            # Final structured return
+            # -------------------------
             return {
                 "id": str(user_id),
                 "name": info.get("name") or "",
