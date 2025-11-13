@@ -23,13 +23,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 @bot.event
 async def setup_hook():
     """Load cogs before the bot becomes ready."""
-initial_extensions = [
-    "cogs.net_commands",     # your slash commands + shift engine
-    "cogs.shift_tracking",   # clock system
-    "cogs.loa",              # LOA system
-    "cogs.modlog",           # mod logs
-    "cogs.config",           # /netconfig
-]
+    initial_extensions = [
+        "cogs.net_commands",     # your slash commands + shift engine
+        "cogs.shift_tracking",   # clock system
+        "cogs.loa",              # LOA system
+        "cogs.modlog",           # mod logs
+        "cogs.config",           # /netconfig
+    ]
 
     for ext in initial_extensions:
         try:
@@ -52,4 +52,3 @@ async def ping(ctx: commands.Context):
 
 if __name__ == "__main__":
     bot.run(TOKEN)
-
