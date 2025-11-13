@@ -15,7 +15,7 @@ def init_db():
     conn = get_connection()
     cur = conn.cursor()
 
-    # Shift tracking: one row per shift
+    # Shift tracking: one row per clocked shift
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS shifts (
@@ -49,6 +49,29 @@ def init_db():
         CREATE TABLE IF NOT EXISTS guild_settings (
             guild_id INTEGER PRIMARY KEY,
             modlog_channel_id INTEGER
+        )
+        """
+    )
+
+    # Clock periods: last reset for each guild (for weekly quotas)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS clock_periods (
+            guild_id INTEGER PRIMARY KEY,
+            reset_at TEXT NOT NULL
+        )
+        """
+    )
+
+    # Manual adjustments to clock time (per period)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS clock_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL,
+            seconds INTEGER NOT NULL,
+            created_at TEXT NOT NULL
         )
         """
     )
