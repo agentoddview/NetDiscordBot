@@ -11,13 +11,11 @@ def get_connection():
 
 
 def init_db():
-    """Create tables if they don't exist and migrate older schemas."""
     conn = get_connection()
     cur = conn.cursor()
 
-    # Shift tracking: one row per clocked shift
-    cur.execute(
-        """
+    # Shift tracking
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS shifts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -25,12 +23,10 @@ def init_db():
             start_time TEXT NOT NULL,
             end_time TEXT
         )
-        """
-    )
+    """)
 
     # LOA tracking
-    cur.execute(
-        """
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS loas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -40,40 +36,35 @@ def init_db():
             end_date TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending'
         )
-        """
-    )
+    """)
 
-    # Guild settings (mod log channel, bot log channel)
-    cur.execute(
-        """
-       CREATE TABLE IF NOT EXISTS guild_settings (
-    guild_id INTEGER PRIMARY KEY,
-    modlog_channel_id INTEGER,
-    botlog_channel_id INTEGER,
-    loa_channel_id INTEGER
-);
+    # Settings table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            guild_id INTEGER PRIMARY KEY,
+            modlog_channel_id INTEGER,
+            botlog_channel_id INTEGER,
+            loa_channel_id INTEGER
         )
-        """
-    )
-    # Migrate older versions that might not have botlog_channel_id
+    """)
+
+    # Add columns if the user didn't have them before
     cur.execute("PRAGMA table_info(guild_settings)")
     cols = {row["name"] for row in cur.fetchall()}
     if "botlog_channel_id" not in cols:
         cur.execute("ALTER TABLE guild_settings ADD COLUMN botlog_channel_id INTEGER")
+    if "loa_channel_id" not in cols:
+        cur.execute("ALTER TABLE guild_settings ADD COLUMN loa_channel_id INTEGER")
 
-    # Clock periods: last reset for each guild (for weekly quotas)
-    cur.execute(
-        """
+    # Clock stuff
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS clock_periods (
             guild_id INTEGER PRIMARY KEY,
             reset_at TEXT NOT NULL
         )
-        """
-    )
+    """)
 
-    # Manual adjustments to clock time (per period)
-    cur.execute(
-        """
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS clock_adjustments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -81,8 +72,7 @@ def init_db():
             seconds INTEGER NOT NULL,
             created_at TEXT NOT NULL
         )
-        """
-    )
+    """)
 
     conn.commit()
     conn.close()
