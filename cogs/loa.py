@@ -135,7 +135,7 @@ class LOATracking(commands.Cog):
         self.bot = bot
         init_db()
 
-    # ---------- helpers: DB ----------
+    # ---------- helpers: DB / channels ----------
 
     def _get_botlog_channel_id(self, guild_id: int) -> int | None:
         with get_connection() as conn:
@@ -170,6 +170,45 @@ class LOATracking(commands.Cog):
         channel = guild.get_channel(channel_id)
         if channel:
             await channel.send(embed=embed)
+
+    async def _send_loa_feed_entry(
+        self,
+        guild: discord.Guild,
+        loa_id: int,
+        user_id: int,
+        reason: str,
+        start: datetime,
+        end: datetime,
+    ):
+        """Send a pending LOA entry to the configured LOA feed channel."""
+        loa_channel_id = self._get_loa_channel_id(guild.id)
+        if not loa_channel_id:
+            return  # no feed configured
+
+        channel = guild.get_channel(loa_channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return
+
+        member_obj = guild.get_member(user_id)
+        mention = member_obj.mention if member_obj else f"<@{user_id}>"
+
+        embed = discord.Embed(
+            title=f"Pending LOA #{loa_id}",
+            description=f"{mention} has requested an LOA.",
+            color=discord.Color.yellow(),
+        )
+        embed.add_field(
+            name="Dates",
+            value=f"{start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')}",
+            inline=False,
+        )
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_footer(
+            text="Use the buttons below to approve or deny this LOA."
+        )
+
+        view = LOAApprovalView(self, loa_id, guild.id)
+        await channel.send(embed=embed, view=view)
 
     # ---------- helpers: actions ----------
 
@@ -259,7 +298,7 @@ class LOATracking(commands.Cog):
         )
         await self._send_botlog(guild, log)
 
-        # Update original log message embed if we have it
+        # Update original LOA feed message, if any
         if log_message is not None and log_message.embeds:
             embed = log_message.embeds[0]
             embed.add_field(
@@ -340,7 +379,7 @@ class LOATracking(commands.Cog):
             "**LOA Commands:**\n"
             "`/loarequest <days> <reason>` - Request an LOA.\n"
             "`/loalist` - List all LOAs for this server.\n"
-            "`/loafeed` - Send pending LOAs to the LOA feed channel with Approve/Deny buttons.\n"
+            "`/loafeed` - Re-send all pending LOAs to the LOA feed channel.\n"
             "`/loaadmin` - Admin panel to end approved LOAs early.\n"
         )
         await interaction.response.send_message(msg, ephemeral=True)
@@ -396,6 +435,7 @@ class LOATracking(commands.Cog):
             loa_id = cur.lastrowid
             conn.commit()
 
+        # Confirm to requester
         await interaction.response.send_message(
             f"📅 LOA `#{loa_id}` requested for **{days} days**.\n"
             f"Reason: `{reason}`\n"
@@ -405,7 +445,12 @@ class LOATracking(commands.Cog):
             ephemeral=True,
         )
 
-        # Log the new LOA request to bot logs
+        # Auto-feed into LOA channel
+        await self._send_loa_feed_entry(
+            guild, loa_id, user_id, reason, start, end
+        )
+
+        # Log to bot logs
         embed = discord.Embed(
             title="New LOA Request",
             description=f"LOA `#{loa_id}` requested by {interaction.user.mention}",
@@ -473,7 +518,7 @@ class LOATracking(commands.Cog):
     @app_commands.command(
         name="loafeed",
         description=(
-            "Send pending LOAs to the LOA feed channel with Approve/Deny buttons."
+            "Re-send all pending LOAs to the LOA feed channel (in case any were missed)."
         ),
     )
     @app_commands.guild_only()
@@ -504,14 +549,6 @@ class LOATracking(commands.Cog):
             )
             return
 
-        loa_channel = guild.get_channel(loa_channel_id)
-        if not isinstance(loa_channel, discord.TextChannel):
-            await interaction.response.send_message(
-                "I can't access the configured LOA feed channel.",
-                ephemeral=True,
-            )
-            return
-
         with get_connection() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -535,36 +572,15 @@ class LOATracking(commands.Cog):
         count = 0
         for row in rows:
             loa_id = row["id"]
-            start = datetime.fromisoformat(row["start_date"]).strftime(
-                "%Y-%m-%d"
+            start = datetime.fromisoformat(row["start_date"])
+            end = datetime.fromisoformat(row["end_date"])
+            await self._send_loa_feed_entry(
+                guild, loa_id, row["user_id"], row["reason"], start, end
             )
-            end = datetime.fromisoformat(row["end_date"]).strftime("%Y-%m-%d")
-            member_obj = guild.get_member(row["user_id"])
-            mention = (
-                member_obj.mention
-                if member_obj
-                else f"<@{row['user_id']}>"
-            )
-
-            embed = discord.Embed(
-                title=f"Pending LOA #{loa_id}",
-                description=f"{mention} has requested an LOA.",
-                color=discord.Color.yellow(),
-            )
-            embed.add_field(
-                name="Dates", value=f"{start} → {end}", inline=False
-            )
-            embed.add_field(name="Reason", value=row["reason"], inline=False)
-            embed.set_footer(
-                text="Use the buttons below to approve or deny this LOA."
-            )
-
-            view = LOAApprovalView(self, loa_id, guild.id)
-            await loa_channel.send(embed=embed, view=view)
             count += 1
 
         await interaction.response.send_message(
-            f"✅ Sent **{count}** pending LOA(s) to {loa_channel.mention}.",
+            f"✅ Sent **{count}** pending LOA(s) to the LOA feed channel.",
             ephemeral=True,
         )
 
