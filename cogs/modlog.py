@@ -1,7 +1,11 @@
+# cogs/modlog.py
 import discord
 from discord.ext import commands
+from discord import app_commands
 
 from database import get_connection, init_db
+
+GUILD_ID = 882441222487162912  # NE Transit guild
 
 
 class ModLog(commands.Cog):
@@ -35,18 +39,42 @@ class ModLog(commands.Cog):
             )
             conn.commit()
 
-    @commands.command(name="setmodlog")
-    @commands.has_permissions(manage_guild=True)
-    async def set_modlog(
-        self, ctx: commands.Context, channel: discord.TextChannel | None
+    # ---- slash command for config ----
+
+    @app_commands.command(
+        name="setmodlog",
+        description="Set or clear the moderation log channel.",
+    )
+    @app_commands.describe(
+        channel="Channel to send mod logs to. Leave empty to clear."
+    )
+    @app_commands.guild_only()
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def setmodlog(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
     ):
-        """Set the mod log channel (or clear with no channel)."""
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
         if channel is None:
-            self._set_modlog_channel_id(ctx.guild.id, None)
-            await ctx.send("🗑️ Mod log channel cleared.")
+            self._set_modlog_channel_id(guild.id, None)
+            await interaction.response.send_message(
+                "🗑️ Mod log channel cleared.",
+                ephemeral=True,
+            )
         else:
-            self._set_modlog_channel_id(ctx.guild.id, channel.id)
-            await ctx.send(f"✅ Mod log channel set to {channel.mention}")
+            self._set_modlog_channel_id(guild.id, channel.id)
+            await interaction.response.send_message(
+                f"✅ Mod log channel set to {channel.mention}.",
+                ephemeral=True,
+            )
 
     async def _send_log(self, guild: discord.Guild, embed: discord.Embed):
         channel_id = self._get_modlog_channel_id(guild.id)
@@ -56,11 +84,14 @@ class ModLog(commands.Cog):
         if channel:
             await channel.send(embed=embed)
 
+    # ---- listeners ----
+
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         embed = discord.Embed(
             title="Member Joined",
             description=f"{member.mention} ({member.id})",
+            color=discord.Color.green(),
         )
         await self._send_log(member.guild, embed)
 
@@ -73,6 +104,7 @@ class ModLog(commands.Cog):
             title="Message Deleted",
             description=f"Author: {message.author.mention}\n"
             f"Channel: {message.channel.mention}",
+            color=discord.Color.orange(),
         )
         if message.content:
             content = message.content
@@ -84,4 +116,8 @@ class ModLog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(ModLog(bot))
+    cog = ModLog(bot)
+    await bot.add_cog(cog)
+
+    guild = discord.Object(id=GUILD_ID)
+    bot.tree.add_command(cog.setmodlog, guild=guild)
