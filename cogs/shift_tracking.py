@@ -90,7 +90,7 @@ class ClockManageView(discord.ui.View):
         assert isinstance(member, discord.Member)
         if member.id == self.member_id:
             return True
-        # allow senior staff to click others' panels
+        # allow senior staff / admins to use others' panels
         if member.guild_permissions.administrator or any(
             r.id == SENIOR_SUPERVISOR_ROLE_ID for r in member.roles
         ):
@@ -100,6 +100,16 @@ class ClockManageView(discord.ui.View):
         )
         return False
 
+    async def _refresh_embed(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            return
+        member = guild.get_member(self.member_id)
+        if member is None:
+            return
+        new_embed = self.cog._build_clockmanage_embed(guild, member)
+        await interaction.response.edit_message(embed=new_embed, view=self)
+
     @discord.ui.button(label="Start", style=discord.ButtonStyle.success)
     async def start_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
@@ -107,7 +117,10 @@ class ClockManageView(discord.ui.View):
         if not await self._check_owner(interaction):
             return
         ok, msg = self.cog._start_shift(self.guild_id, self.member_id)
-        await interaction.response.send_message(msg, ephemeral=True)
+        if not ok:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+        await self._refresh_embed(interaction)
 
     @discord.ui.button(label="Pause", style=discord.ButtonStyle.secondary)
     async def pause_button(
@@ -115,15 +128,13 @@ class ClockManageView(discord.ui.View):
     ):
         if not await self._check_owner(interaction):
             return
-        ok, dur = self.cog._end_shift(self.guild_id, self.member_id)
+        ok, _ = self.cog._end_shift(self.guild_id, self.member_id)
         if not ok:
             await interaction.response.send_message(
                 "You don't have an active clock to pause.", ephemeral=True
             )
             return
-        await interaction.response.send_message(
-            f"⏱ Clock paused. This segment: **{dur}**", ephemeral=True
-        )
+        await self._refresh_embed(interaction)
 
     @discord.ui.button(label="End", style=discord.ButtonStyle.danger)
     async def end_button(
@@ -131,15 +142,13 @@ class ClockManageView(discord.ui.View):
     ):
         if not await self._check_owner(interaction):
             return
-        ok, dur = self.cog._end_shift(self.guild_id, self.member_id)
+        ok, _ = self.cog._end_shift(self.guild_id, self.member_id)
         if not ok:
             await interaction.response.send_message(
                 "You don't have an active clock to end.", ephemeral=True
             )
             return
-        await interaction.response.send_message(
-            f"✅ Clock ended. Last segment: **{dur}**", ephemeral=True
-        )
+        await self._refresh_embed(interaction)
 
 
 class ShiftTracking(commands.Cog):
@@ -342,9 +351,38 @@ class ShiftTracking(commands.Cog):
         avg = total // count if count else 0
         return count, total, avg
 
-    # ---------- slash commands (existing ones) ----------
-    # (startclock, endclock, clocktotal, clockadmin, clockboard, clockadjust, clockreset)
-    # ... unchanged from previous version, except they now use _start_shift
+    def _build_clockmanage_embed(
+        self, guild: discord.Guild, member: discord.Member
+    ) -> discord.Embed:
+        """Build the live stats embed used by /clockmanage."""
+        count, total, avg = self._get_all_time_stats(guild.id, member.id)
+
+        embed = discord.Embed(
+            title="Shift Management",
+            color=discord.Color.blurple(),
+        )
+        embed.set_author(
+            name=member.display_name,
+            icon_url=member.display_avatar.url,
+        )
+        embed.add_field(name="All Time Information", value="\u200b", inline=False)
+        embed.add_field(name="Shift Count", value=str(count), inline=True)
+        embed.add_field(
+            name="Total Duration",
+            value=self._format_duration(total),
+            inline=True,
+        )
+        embed.add_field(
+            name="Average Duration",
+            value=self._format_duration(avg),
+            inline=True,
+        )
+        embed.add_field(
+            name="Shift Type", value="Supervisor Shifts", inline=False
+        )
+        return embed
+
+    # ---------- slash commands ----------
 
     @app_commands.command(
         name="startclock",
@@ -634,8 +672,6 @@ class ShiftTracking(commands.Cog):
             ephemeral=True,
         )
 
-    # ---------- NEW: /clockmanage ----------
-
     @app_commands.command(
         name="clockmanage",
         description="Open your shift management panel (Start / Pause / End).",
@@ -646,7 +682,7 @@ class ShiftTracking(commands.Cog):
         member = interaction.user
         assert isinstance(member, discord.Member)
 
-        # optionally require Supervisor role to use manage panel
+        # require Supervisor role (or higher) to use manage panel
         role_ids = {r.id for r in member.roles}
         if SUPERVISOR_ROLE_ID not in role_ids and not (
             member.guild_permissions.administrator
@@ -658,28 +694,7 @@ class ShiftTracking(commands.Cog):
             )
             return
 
-        count, total, avg = self._get_all_time_stats(guild.id, member.id)
-
-        embed = discord.Embed(
-            title="Shift Management",
-            color=discord.Color.blurple(),
-        )
-        embed.add_field(name="All Time Information", value="\u200b", inline=False)
-        embed.add_field(name="Shift Count", value=str(count), inline=True)
-        embed.add_field(
-            name="Total Duration",
-            value=self._format_duration(total),
-            inline=True,
-        )
-        embed.add_field(
-            name="Average Duration",
-            value=self._format_duration(avg),
-            inline=True,
-        )
-        embed.add_field(
-            name="Shift Type", value="Supervisor Shifts", inline=False
-        )
-
+        embed = self._build_clockmanage_embed(guild, member)
         view = ClockManageView(self, member)
         await interaction.response.send_message(embed=embed, view=view)
 
