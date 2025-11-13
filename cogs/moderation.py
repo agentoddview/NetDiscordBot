@@ -1,6 +1,5 @@
 import aiohttp
 import sqlite3
-import asyncio
 from datetime import datetime, timezone
 from typing import List
 
@@ -11,7 +10,6 @@ from discord import app_commands
 from database import get_connection, init_db
 
 GUILD_ID = 882441222487162912  # NE Transit guild
-
 
 PUNISHMENTS = [
     "Warning",
@@ -24,18 +22,26 @@ PUNISHMENTS = [
 
 
 class ModerateConfirmView(discord.ui.View):
+    """Confirm / Cancel buttons for a pending moderation card."""
+
     def __init__(self, cog: "Moderation", data: dict):
         super().__init__(timeout=180)
         self.cog = cog
-        self.data = data  # guild_id, moderator_id, roblox_id, username, punishment, reason
+        # data: guild_id, moderator_id, roblox_id, username, punishment, reason
+        self.data = data
 
     async def _check_perms(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.data["moderator_id"]:
+        """Only the original moderator or someone with Manage Server can confirm/cancel."""
+        member = interaction.user
+        assert isinstance(member, discord.Member)
+        if member.id == self.data["moderator_id"]:
             return True
-        if interaction.user.guild_permissions.manage_guild:
+        if member.guild_permissions.manage_guild or member.guild_permissions.administrator:
             return True
+
         await interaction.response.send_message(
-            "❌ You are not allowed to confirm this moderation.", ephemeral=True
+            "❌ You are not allowed to confirm or cancel this moderation.",
+            ephemeral=True,
         )
         return False
 
@@ -45,10 +51,10 @@ class ModerateConfirmView(discord.ui.View):
 
         ok, msg = await self.cog._record_moderation(self.data, interaction.user)
         if not ok:
-            await interaction.followup.send(msg, ephemeral=True)
+            await interaction.response.send_message(msg, ephemeral=True)
             return
 
-        # edit original embed to show status
+        # Add a Status field to the original embed and remove buttons
         if interaction.message and interaction.message.embeds:
             embed = interaction.message.embeds[0]
             embed.add_field(
@@ -80,7 +86,8 @@ class ModerateConfirmView(discord.ui.View):
                 pass
 
         await interaction.response.send_message(
-            "Moderation canceled. No record was saved.", ephemeral=True
+            "Moderation canceled. No record was saved.",
+            ephemeral=True,
         )
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
@@ -103,11 +110,9 @@ class Moderation(commands.Cog):
         self.bot = bot
         init_db()
 
-    # ---------- helpers: settings ----------
+    # ---------- helpers: settings / logging ----------
 
     def _get_botlog_channel_id(self, guild_id: int) -> int | None:
-        from database import get_connection  # avoid circular import issues
-
         with get_connection() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -125,7 +130,7 @@ class Moderation(commands.Cog):
         if channel:
             await channel.send(embed=embed)
 
-      # ---------- helpers: Roblox API ----------
+    # ---------- helpers: Roblox API ----------
 
     async def _fetch_roblox_user(self, query: str):
         """
@@ -142,31 +147,24 @@ class Moderation(commands.Cog):
         or None if not found.
         """
         async with aiohttp.ClientSession() as session:
-            # -------------------------
-            # 1) Username → User ID resolve
-            # -------------------------
+            # 1) Resolve username -> ID if needed
             if query.isdigit():
                 user_id = int(query)
             else:
                 url = "https://users.roblox.com/v1/usernames/users"
                 payload = {
                     "usernames": [query],
-                    "excludeBannedUsers": False
+                    "excludeBannedUsers": False,
                 }
-
                 async with session.post(url, json=payload) as resp:
                     if resp.status != 200:
                         return None
                     data = await resp.json()
-
                     if not data.get("data"):
                         return None
-
                     user_id = data["data"][0]["id"]
 
-            # -------------------------
-            # 2) Fetch core user details
-            # -------------------------
+            # 2) Fetch user details
             async with session.get(
                 f"https://users.roblox.com/v1/users/{user_id}"
             ) as resp:
@@ -174,37 +172,27 @@ class Moderation(commands.Cog):
                     return None
                 info = await resp.json()
 
-            # -------------------------
-            # 3) Fetch proper avatar headshot
-            #    (Roblox Thumbnails API)
-            # -------------------------
+            # 3) Fetch proper avatar headshot via thumbnails API
             thumb_url = None
             thumb_api = (
                 "https://thumbnails.roblox.com/v1/users/avatar-headshot"
                 f"?userIds={user_id}&size=420x420&format=Png&isCircular=false"
             )
-
             async with session.get(thumb_api) as resp:
                 if resp.status == 200:
                     tdata = await resp.json()
                     if tdata.get("data"):
                         thumb_url = tdata["data"][0].get("imageUrl")
 
-            # If Roblox thumbnail API failed, fallback to legacy
+            # Fallback to classic URL if thumbnails API fails
             if not thumb_url:
                 thumb_url = (
                     "https://www.roblox.com/headshot-thumbnail/image"
                     f"?userId={user_id}&width=420&height=420&format=png"
                 )
 
-            # -------------------------
-            # 4) Profile URL
-            # -------------------------
             profile_url = f"https://www.roblox.com/users/{user_id}/profile"
 
-            # -------------------------
-            # Final structured return
-            # -------------------------
             return {
                 "id": str(user_id),
                 "name": info.get("name") or "",
@@ -214,12 +202,30 @@ class Moderation(commands.Cog):
                 "profile_url": profile_url,
             }
 
-    # ---------- helpers: core logic ----------
+    # ---------- helpers: DB ----------
+
+    def _get_previous_moderations(
+        self, guild_id: int, roblox_id: str, limit: int = 5
+    ) -> List[sqlite3.Row]:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT *
+                FROM moderations
+                WHERE guild_id = ? AND target_roblox_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (guild_id, roblox_id, limit),
+            )
+            return cur.fetchall()
 
     async def _record_moderation(self, data: dict, moderator: discord.Member):
         """
-        Save the moderation and log it. DATA keys:
-        guild_id, roblox_id, username, punishment, reason
+        Save the moderation and log it.
+        DATA keys:
+            guild_id, roblox_id, username, punishment, reason
         """
         guild_id = data["guild_id"]
         roblox_id = data["roblox_id"]
@@ -255,19 +261,12 @@ class Moderation(commands.Cog):
         guild = moderator.guild
         created_str = now.strftime("%m/%d/%Y %I:%M %p")
 
-                profile_url = info.get("profile_url") or f"https://www.roblox.com/users/{roblox_id}/profile"
-
         embed = discord.Embed(
-            title=display_name,              # this text will be clickable
-            description="Pending Moderation",
-            color=discord.Color.blurple(),
-            url=profile_url,         # clicking the title opens the Roblox profile
-            
-        )
-                embed.add_field(
-            name="Profile",
-            value=f"[Open Roblox Profile]({profile_url})",
-            inline=False,
+            title=f"Moderation Logged (Case #{case_id})",
+            description=f"**{username}** ({roblox_id})",
+            color=discord.Color.red()
+            if punishment.lower() in {"global ban", "server ban", "kick"}
+            else discord.Color.orange(),
         )
         embed.add_field(name="Punishment", value=punishment, inline=True)
         embed.add_field(name="Reason", value=reason, inline=True)
@@ -290,9 +289,7 @@ class Moderation(commands.Cog):
         reason="Reason for the moderation.",
     )
     @app_commands.choices(
-        punishment=[
-            app_commands.Choice(name=p, value=p) for p in PUNISHMENTS
-        ]
+        punishment=[app_commands.Choice(name=p, value=p) for p in PUNISHMENTS]
     )
     @app_commands.guild_only()
     async def moderate(
@@ -310,12 +307,13 @@ class Moderation(commands.Cog):
             )
             return
 
-        await interaction.response.defer(thinking=True, ephemeral=False)
+        await interaction.response.defer(thinking=True)
 
         info = await self._fetch_roblox_user(roblox_user)
         if not info:
             await interaction.followup.send(
-                "❌ Could not find that Roblox user.", ephemeral=True
+                "❌ Could not find that Roblox user.",
+                ephemeral=True,
             )
             return
 
@@ -323,32 +321,32 @@ class Moderation(commands.Cog):
         username = info["name"] or info["displayName"] or roblox_id
         display_name = info["displayName"] or username
 
-        # Parse account creation date
+        # Account creation date
         created_raw = info["created"]
         try:
             created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-            created_str = created_dt.strftime("%-m/%-d/%Y")
+            created_str = created_dt.strftime("%m/%d/%Y")
         except Exception:
             created_str = created_raw or "Unknown"
 
         # Previous moderations
-        prev = self._get_previous_moderations(guild.id, roblox_id, limit=5)
-        prev_lines = []
-        for i, row in enumerate(prev, start=1):
+        prev_rows = self._get_previous_moderations(guild.id, roblox_id, limit=5)
+        prev_lines: List[str] = []
+        for i, row in enumerate(prev_rows, start=1):
             when = datetime.fromisoformat(row["created_at"])
             when_str = when.strftime("%m/%d/%Y %I:%M %p")
             prev_lines.append(
                 f"{i}. {when_str} • {row['punishment']} • {row['reason']}"
             )
-        if not prev_lines:
-            prev_text = "None"
-        else:
-            prev_text = "\n".join(prev_lines)
+        prev_text = "\n".join(prev_lines) if prev_lines else "None"
+
+        profile_url = info["profile_url"]
 
         embed = discord.Embed(
-            title=display_name,
+            title=display_name,  # clickable to profile
             description="Pending Moderation",
             color=discord.Color.blurple(),
+            url=profile_url,
         )
         embed.add_field(name="User ID", value=roblox_id, inline=True)
         embed.add_field(name="Display Name", value=display_name, inline=True)
@@ -356,9 +354,10 @@ class Moderation(commands.Cog):
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.add_field(name="Punishment", value=punishment.value, inline=False)
         embed.add_field(
-            name="Previous Moderations", value=prev_text, inline=False
+            name="Previous Moderations",
+            value=prev_text,
+            inline=False,
         )
-
         embed.set_thumbnail(url=info["thumbnail_url"])
 
         data = {
