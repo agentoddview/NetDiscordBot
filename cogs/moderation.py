@@ -226,12 +226,19 @@ class Moderation(commands.Cog):
         guild = moderator.guild
         created_str = now.strftime("%m/%d/%Y %I:%M %p")
 
+                profile_url = info.get("profile_url") or f"https://www.roblox.com/users/{roblox_id}/profile"
+
         embed = discord.Embed(
-            title=f"Moderation Logged (Case #{case_id})",
-            description=f"**{username}** ({roblox_id})",
-            color=discord.Color.red()
-            if punishment.lower() in {"global ban", "server ban", "kick"}
-            else discord.Color.orange(),
+            title=display_name,              # this text will be clickable
+            description="Pending Moderation",
+            color=discord.Color.blurple(),
+            url=profile_url,         # clicking the title opens the Roblox profile
+            
+        )
+                embed.add_field(
+            name="Profile",
+            value=f"[Open Roblox Profile]({profile_url})",
+            inline=False,
         )
         embed.add_field(name="Punishment", value=punishment, inline=True)
         embed.add_field(name="Reason", value=reason, inline=True)
