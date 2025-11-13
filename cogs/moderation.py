@@ -104,7 +104,7 @@ class ModerateConfirmView(discord.ui.View):
 
 
 class Moderation(commands.Cog):
-    """Roblox-focused moderation logging with pretty confirmation cards."""
+    """Roblox-focused moderation logging with nice embeds and stats."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -152,10 +152,7 @@ class Moderation(commands.Cog):
                 user_id = int(query)
             else:
                 url = "https://users.roblox.com/v1/usernames/users"
-                payload = {
-                    "usernames": [query],
-                    "excludeBannedUsers": False,
-                }
+                payload = {"usernames": [query], "excludeBannedUsers": False}
                 async with session.post(url, json=payload) as resp:
                     if resp.status != 200:
                         return None
@@ -221,6 +218,33 @@ class Moderation(commands.Cog):
             )
             return cur.fetchall()
 
+    def _get_moderation_case(self, guild_id: int, case_id: int):
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT *
+                FROM moderations
+                WHERE guild_id = ? AND id = ?
+                """,
+                (guild_id, case_id),
+            )
+            return cur.fetchone()
+
+    def _get_target_moderations(self, guild_id: int, roblox_id: str):
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT *
+                FROM moderations
+                WHERE guild_id = ? AND target_roblox_id = ?
+                ORDER BY created_at DESC
+                """,
+                (guild_id, roblox_id),
+            )
+            return cur.fetchall()
+
     async def _record_moderation(self, data: dict, moderator: discord.Member):
         """
         Save the moderation and log it.
@@ -277,7 +301,84 @@ class Moderation(commands.Cog):
 
         return True, f"Moderation recorded as **Case #{case_id}**."
 
-    # ---------- slash command ----------
+    # ---------- helpers: stats ----------
+
+    def _get_shift_stats_all_time(self, guild_id: int, user_id: int):
+        """Return (count, total_secs, avg_secs) for completed shifts."""
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT start_time, end_time
+                FROM shifts
+                WHERE guild_id = ? AND user_id = ? AND end_time IS NOT NULL
+                """,
+                (guild_id, user_id),
+            )
+            rows = cur.fetchall()
+
+        count = 0
+        total = 0
+        for row in rows:
+            start = datetime.fromisoformat(row["start_time"])
+            end = datetime.fromisoformat(row["end_time"])
+            total += int((end - start).total_seconds())
+            count += 1
+
+        avg = total // count if count else 0
+        return count, total, avg
+
+    def _get_loa_stats_for_user(self, guild_id: int, user_id: int):
+        """
+        Return LOA stats for this user:
+        (accepted_count, denied_count, pending_count, total_duration_secs)
+        total_duration_secs counts approved/ended LOAs.
+        """
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT status, start_date, end_date
+                FROM loas
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (guild_id, user_id),
+            )
+            rows = cur.fetchall()
+
+        accepted = denied = pending = 0
+        total_duration = 0
+
+        for row in rows:
+            status = row["status"]
+            start = datetime.fromisoformat(row["start_date"])
+            end = datetime.fromisoformat(row["end_date"])
+
+            if status in ("approved", "ended"):
+                accepted += 1
+                total_duration += int((end - start).total_seconds())
+            elif status == "denied":
+                denied += 1
+            elif status == "pending":
+                pending += 1
+
+        return accepted, denied, pending, total_duration
+
+    @staticmethod
+    def _format_long_duration(seconds: int) -> str:
+        seconds = int(max(0, seconds))
+        minutes, sec = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        parts = []
+        if hours:
+            parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+        if minutes:
+            parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+        if sec or not parts:
+            parts.append(f"{sec} second{'s' if sec != 1 else ''}")
+        return ", ".join(parts)
+
+    # ---------- slash commands ----------
 
     @app_commands.command(
         name="moderate",
@@ -372,6 +473,226 @@ class Moderation(commands.Cog):
 
         await interaction.followup.send(embed=embed, view=view)
 
+    @app_commands.command(
+        name="editmoderation",
+        description="Edit a logged moderation case.",
+    )
+    @app_commands.describe(
+        case_id="The moderation case ID to edit.",
+        punishment="New punishment for this case.",
+        reason="New reason for this case.",
+    )
+    @app_commands.choices(
+        punishment=[app_commands.Choice(name=p, value=p) for p in PUNISHMENTS]
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.guild_only()
+    async def editmoderation(
+        self,
+        interaction: discord.Interaction,
+        case_id: int,
+        punishment: app_commands.Choice[str],
+        reason: str,
+    ):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        row = self._get_moderation_case(guild.id, case_id)
+        if not row:
+            await interaction.response.send_message(
+                f"❌ Case `#{case_id}` does not exist in this server.",
+                ephemeral=True,
+            )
+            return
+
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE moderations
+                SET punishment = ?, reason = ?
+                WHERE id = ? AND guild_id = ?
+                """,
+                (punishment.value, reason, case_id, guild.id),
+            )
+            conn.commit()
+
+        embed = discord.Embed(
+            title=f"Moderation Edited (Case #{case_id})",
+            description=f"Target: **{row['target_username']}** ({row['target_roblox_id']})",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="New Punishment",
+            value=punishment.value,
+            inline=True,
+        )
+        embed.add_field(name="New Reason", value=reason, inline=True)
+        embed.add_field(
+            name="Edited By",
+            value=interaction.user.mention,
+            inline=False,
+        )
+
+        await self._send_botlog(guild, embed)
+
+        await interaction.response.send_message(
+            f"✅ Case `#{case_id}` has been updated.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="lookup",
+        description="Look up all moderations for a Roblox user.",
+    )
+    @app_commands.describe(
+        roblox_user="Roblox username or numeric user ID to look up."
+    )
+    @app_commands.guild_only()
+    async def lookup(
+        self,
+        interaction: discord.Interaction,
+        roblox_user: str,
+    ):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        info = await self._fetch_roblox_user(roblox_user)
+        if not info:
+            await interaction.followup.send(
+                "❌ Could not find that Roblox user.", ephemeral=True
+            )
+            return
+
+        roblox_id = info["id"]
+        username = info["name"] or info["displayName"] or roblox_id
+        display_name = info["displayName"] or username
+
+        rows = self._get_target_moderations(guild.id, roblox_id)
+        if not rows:
+            await interaction.followup.send(
+                f"User **{display_name}** ({roblox_id}) has no recorded moderations.",
+                ephemeral=True,
+            )
+            return
+
+        lines: List[str] = []
+        for row in rows[:15]:  # cap to avoid huge embeds
+            when = datetime.fromisoformat(row["created_at"])
+            when_str = when.strftime("%m/%d/%Y %I:%M %p")
+            moderator = guild.get_member(row["moderator_id"])
+            mod_name = moderator.mention if moderator else f"`{row['moderator_id']}`"
+            lines.append(
+                f"Case #{row['id']} • {when_str}\n"
+                f"• {row['punishment']} • {row['reason']} • by {mod_name}"
+            )
+
+        profile_url = info["profile_url"]
+        embed = discord.Embed(
+            title=f"Moderation History – {display_name}",
+            description="\n\n".join(lines),
+            color=discord.Color.blurple(),
+            url=profile_url,
+        )
+        embed.add_field(name="Roblox ID", value=roblox_id, inline=True)
+        embed.add_field(name="Username", value=username, inline=True)
+        embed.set_thumbnail(url=info["thumbnail_url"])
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="modstats",
+        description="View staff moderation, shift, and LOA stats.",
+    )
+    @app_commands.describe(
+        member="Staff member to view stats for. Defaults to yourself."
+    )
+    @app_commands.guild_only()
+    async def modstats(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+    ):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        target = member or interaction.user
+
+        # Moderation stats
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT COUNT(*) AS total, COUNT(DISTINCT target_roblox_id) AS individuals
+                FROM moderations
+                WHERE guild_id = ? AND moderator_id = ?
+                """,
+                (guild.id, target.id),
+            )
+            row = cur.fetchone()
+        total_mods = row["total"] if row else 0
+        individuals = row["individuals"] if row else 0
+
+        # Shift stats (all time)
+        shift_count, shift_total, shift_avg = self._get_shift_stats_all_time(
+            guild.id, target.id
+        )
+
+        # LOA stats (as user taking LOAs)
+        loa_accepted, loa_denied, loa_pending, loa_duration = self._get_loa_stats_for_user(
+            guild.id, target.id
+        )
+
+        embed = discord.Embed(
+            title=str(target),
+            color=discord.Color.blurple(),
+        )
+        embed.set_author(
+            name=str(target.display_name),
+            icon_url=target.display_avatar.url,
+        )
+
+        moderations_block = (
+            f"**Total Moderations:** {total_mods}\n"
+            f"**Moderated Individuals:** {individuals}"
+        )
+
+        shifts_block = (
+            f"**Total Shifts:** {shift_count}\n"
+            f"**Total Duration:** {self._format_long_duration(shift_total)}\n"
+            f"**Average Duration:** {self._format_long_duration(shift_avg)}"
+        )
+
+        loa_block = (
+            f"**Total Accepted:** {loa_accepted}\n"
+            f"**Total Denied:** {loa_denied}\n"
+            f"**Currently Pending:** {loa_pending}\n"
+            f"**Total Duration:** {self._format_long_duration(loa_duration)}"
+        )
+
+        embed.add_field(name="Moderations", value=moderations_block, inline=False)
+        embed.add_field(name="Shifts", value=shifts_block, inline=False)
+        embed.add_field(name="Leave of Absences", value=loa_block, inline=False)
+
+        await interaction.response.send_message(embed=embed)
+
 
 async def setup(bot: commands.Bot):
     cog = Moderation(bot)
@@ -379,3 +700,6 @@ async def setup(bot: commands.Bot):
 
     guild = discord.Object(id=GUILD_ID)
     bot.tree.add_command(cog.moderate, guild=guild)
+    bot.tree.add_command(cog.editmoderation, guild=guild)
+    bot.tree.add_command(cog.lookup, guild=guild)
+    bot.tree.add_command(cog.modstats, guild=guild)
