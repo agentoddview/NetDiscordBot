@@ -23,83 +23,6 @@ PUNISHMENTS = [
 
 class ModerateConfirmView(discord.ui.View):
     """Confirm / Cancel buttons for a pending moderation card."""
-    
-class EditModerationConfirmView(discord.ui.View):
-    """Confirm / Cancel for editing an existing moderation case."""
-
-    def __init__(self, cog: "Moderation", data: dict):
-        super().__init__(timeout=180)
-        self.cog = cog
-        # data: guild_id, case_id, new_punishment, new_reason
-        self.data = data
-
-    async def _check_perms(self, interaction: discord.Interaction) -> bool:
-        member = interaction.user
-        assert isinstance(member, discord.Member)
-        if member.guild_permissions.manage_guild or member.guild_permissions.administrator:
-            return True
-        await interaction.response.send_message(
-            "❌ You are not allowed to edit moderation logs.",
-            ephemeral=True,
-        )
-        return False
-
-    async def _do_confirm(self, interaction: discord.Interaction):
-        if not await self._check_perms(interaction):
-            return
-
-        ok, msg = await self.cog._apply_moderation_edit(self.data, interaction.user)
-        if not ok:
-            await interaction.response.send_message(msg, ephemeral=True)
-            return
-
-        if interaction.message and interaction.message.embeds:
-            embed = interaction.message.embeds[0]
-            embed.add_field(
-                name="Status",
-                value=f"✅ Edited by {interaction.user.mention}",
-                inline=False,
-            )
-            try:
-                await interaction.message.edit(embed=embed, view=None)
-            except Exception:
-                pass
-
-        await interaction.response.send_message(msg, ephemeral=True)
-
-    async def _do_cancel(self, interaction: discord.Interaction):
-        if not await self._check_perms(interaction):
-            return
-
-        if interaction.message and interaction.message.embeds:
-            embed = interaction.message.embeds[0]
-            embed.add_field(
-                name="Status",
-                value=f"❌ Edit canceled by {interaction.user.mention}",
-                inline=False,
-            )
-            try:
-                await interaction.message.edit(embed=embed, view=None)
-            except Exception:
-                pass
-
-        await interaction.response.send_message(
-            "Moderation edit canceled. No changes were saved.",
-            ephemeral=True,
-        )
-
-    @discord.ui.button(label="Confirm Edit", style=discord.ButtonStyle.success)
-    async def confirm_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        await self._do_confirm(interaction)
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
-    async def cancel_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        await self._do_cancel(interaction)
-
 
     def __init__(self, cog: "Moderation", data: dict):
         super().__init__(timeout=180)
@@ -168,6 +91,83 @@ class EditModerationConfirmView(discord.ui.View):
         )
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._do_confirm(interaction)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._do_cancel(interaction)
+
+
+class EditModerationConfirmView(discord.ui.View):
+    """Confirm / Cancel for editing an existing moderation case."""
+
+    def __init__(self, cog: "Moderation", data: dict):
+        super().__init__(timeout=180)
+        self.cog = cog
+        # data: guild_id, case_id, new_punishment, new_reason
+        self.data = data
+
+    async def _check_perms(self, interaction: discord.Interaction) -> bool:
+        member = interaction.user
+        assert isinstance(member, discord.Member)
+        if member.guild_permissions.manage_guild or member.guild_permissions.administrator:
+            return True
+        await interaction.response.send_message(
+            "❌ You are not allowed to edit moderation logs.",
+            ephemeral=True,
+        )
+        return False
+
+    async def _do_confirm(self, interaction: discord.Interaction):
+        if not await self._check_perms(interaction):
+            return
+
+        ok, msg = await self.cog._apply_moderation_edit(self.data, interaction.user)
+        if not ok:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+
+        if interaction.message and interaction.message.embeds:
+            embed = interaction.message.embeds[0]
+            embed.add_field(
+                name="Status",
+                value=f"✅ Edited by {interaction.user.mention}",
+                inline=False,
+            )
+            try:
+                await interaction.message.edit(embed=embed, view=None)
+            except Exception:
+                pass
+
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    async def _do_cancel(self, interaction: discord.Interaction):
+        if not await self._check_perms(interaction):
+            return
+
+        if interaction.message and interaction.message.embeds:
+            embed = interaction.message.embeds[0]
+            embed.add_field(
+                name="Status",
+                value=f"❌ Edit canceled by {interaction.user.mention}",
+                inline=False,
+            )
+            try:
+                await interaction.message.edit(embed=embed, view=None)
+            except Exception:
+                pass
+
+        await interaction.response.send_message(
+            "Moderation edit canceled. No changes were saved.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Confirm Edit", style=discord.ButtonStyle.success)
     async def confirm_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
@@ -369,7 +369,6 @@ class Moderation(commands.Cog):
             if punishment.lower() in {"global ban", "server ban", "kick"}
             else discord.Color.orange(),
         )
-        
         embed.add_field(name="Punishment", value=punishment, inline=True)
         embed.add_field(name="Reason", value=reason, inline=True)
         embed.add_field(name="Moderator", value=moderator.mention, inline=False)
@@ -380,6 +379,7 @@ class Moderation(commands.Cog):
         return True, f"Moderation recorded as **Case #{case_id}**."
 
     async def _apply_moderation_edit(self, data: dict, editor: discord.Member):
+        """Actually apply an edit after it has been confirmed."""
         guild_id = data["guild_id"]
         case_id = data["case_id"]
         new_punishment = data["new_punishment"]
@@ -589,7 +589,7 @@ class Moderation(commands.Cog):
 
         await interaction.followup.send(embed=embed, view=view)
 
-        @app_commands.command(
+    @app_commands.command(
         name="editmoderation",
         description="Edit a logged moderation case.",
     )
@@ -647,51 +647,6 @@ class Moderation(commands.Cog):
         await interaction.response.send_message(
             embed=embed,
             view=view,
-            ephemeral=True,
-        )
-            return
-
-        row = self._get_moderation_case(guild.id, case_id)
-        if not row:
-            await interaction.response.send_message(
-                f"❌ Case `#{case_id}` does not exist in this server.",
-                ephemeral=True,
-            )
-            return
-
-        with get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                UPDATE moderations
-                SET punishment = ?, reason = ?
-                WHERE id = ? AND guild_id = ?
-                """,
-                (punishment.value, reason, case_id, guild.id),
-            )
-            conn.commit()
-
-        embed = discord.Embed(
-            title=f"Moderation Edited (Case #{case_id})",
-            description=f"Target: **{row['target_username']}** ({row['target_roblox_id']})",
-            color=discord.Color.blurple(),
-        )
-        embed.add_field(
-            name="New Punishment",
-            value=punishment.value,
-            inline=True,
-        )
-        embed.add_field(name="New Reason", value=reason, inline=True)
-        embed.add_field(
-            name="Edited By",
-            value=interaction.user.mention,
-            inline=False,
-        )
-
-        await self._send_botlog(guild, embed)
-
-        await interaction.response.send_message(
-            f"✅ Case `#{case_id}` has been updated.",
             ephemeral=True,
         )
 
