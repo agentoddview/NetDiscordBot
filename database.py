@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path("bot_data.db")
+DB_PATH = Path("/data/netbot.db")
 
 
 def get_connection():
