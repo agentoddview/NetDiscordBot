@@ -46,10 +46,12 @@ def init_db():
     # Guild settings (mod log channel, bot log channel)
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS guild_settings (
-            guild_id INTEGER PRIMARY KEY,
-            modlog_channel_id INTEGER,
-            botlog_channel_id INTEGER
+       CREATE TABLE IF NOT EXISTS guild_settings (
+    guild_id INTEGER PRIMARY KEY,
+    modlog_channel_id INTEGER,
+    botlog_channel_id INTEGER,
+    loa_channel_id INTEGER
+);
         )
         """
     )
