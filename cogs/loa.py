@@ -129,7 +129,7 @@ class LOAAdminView(discord.ui.View):
 
 
 class LOATracking(commands.Cog):
-    """LOA (Leave of Absence) tracking with slash commands + approval flow."""
+    """LOA tracking with slash commands + approval flow."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -137,24 +137,39 @@ class LOATracking(commands.Cog):
 
     # ---------- helpers: DB ----------
 
-   # ---------- helpers: DB ----------
+    def _get_botlog_channel_id(self, guild_id: int) -> int | None:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT botlog_channel_id FROM guild_settings WHERE guild_id = ?",
+                (guild_id,),
+            )
+            row = cur.fetchone()
+        return row["botlog_channel_id"] if row and row["botlog_channel_id"] else None
 
-def _get_botlog_channel_id(self, guild_id: int) -> int | None:
-    ...
-    return row["botlog_channel_id"] if row and row["botlog_channel_id"] else None
+    def _get_loa_channel_id(self, guild_id: int) -> int | None:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT loa_channel_id FROM guild_settings WHERE guild_id = ?",
+                (guild_id,),
+            )
+            row = cur.fetchone()
+        return row["loa_channel_id"] if row and row["loa_channel_id"] else None
 
-def _get_loa_channel_id(self, guild_id: int) -> int | None:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT loa_channel_id FROM guild_settings WHERE guild_id = ?",
-            (guild_id,),
-        )
-        row = cur.fetchone()
-    return row["loa_channel_id"] if row and row["loa_channel_id"] else None
+    def _get_loa(self, loa_id: int):
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM loas WHERE id = ?", (loa_id,))
+            return cur.fetchone()
 
-def _get_loa(self, loa_id: int):
-    ...
+    async def _send_botlog(self, guild: discord.Guild, embed: discord.Embed):
+        channel_id = self._get_botlog_channel_id(guild.id)
+        if not channel_id:
+            return
+        channel = guild.get_channel(channel_id)
+        if channel:
+            await channel.send(embed=embed)
 
     # ---------- helpers: actions ----------
 
@@ -325,7 +340,7 @@ def _get_loa(self, loa_id: int):
             "**LOA Commands:**\n"
             "`/loarequest <days> <reason>` - Request an LOA.\n"
             "`/loalist` - List all LOAs for this server.\n"
-            "`/loafeed` - Send pending LOAs to the Net Bot Logs channel with Approve/Deny buttons.\n"
+            "`/loafeed` - Send pending LOAs to the LOA feed channel with Approve/Deny buttons.\n"
             "`/loaadmin` - Admin panel to end approved LOAs early.\n"
         )
         await interaction.response.send_message(msg, ephemeral=True)
@@ -390,7 +405,7 @@ def _get_loa(self, loa_id: int):
             ephemeral=True,
         )
 
-        # Log the new LOA request to Net Bot Logs channel
+        # Log the new LOA request to bot logs
         embed = discord.Embed(
             title="New LOA Request",
             description=f"LOA `#{loa_id}` requested by {interaction.user.mention}",
@@ -458,7 +473,7 @@ def _get_loa(self, loa_id: int):
     @app_commands.command(
         name="loafeed",
         description=(
-            "Send pending LOAs to the Net Bot Logs channel with Approve/Deny buttons."
+            "Send pending LOAs to the LOA feed channel with Approve/Deny buttons."
         ),
     )
     @app_commands.guild_only()
@@ -482,17 +497,17 @@ def _get_loa(self, loa_id: int):
             return
 
         loa_channel_id = self._get_loa_channel_id(guild.id)
-        if not botlog_channel_id:
+        if not loa_channel_id:
             await interaction.response.send_message(
-                "Net Bot Logs channel is not configured. Use `/netconfig` first.",
+                "LOA feed channel is not configured. Use `/netconfig` to set it.",
                 ephemeral=True,
             )
             return
 
-        botlog_channel = guild.get_channel(botlog_channel_id)
-        if not isinstance(botlog_channel, discord.TextChannel):
+        loa_channel = guild.get_channel(loa_channel_id)
+        if not isinstance(loa_channel, discord.TextChannel):
             await interaction.response.send_message(
-                "I can't access the configured Net Bot Logs channel.",
+                "I can't access the configured LOA feed channel.",
                 ephemeral=True,
             )
             return
@@ -545,11 +560,11 @@ def _get_loa(self, loa_id: int):
             )
 
             view = LOAApprovalView(self, loa_id, guild.id)
-            await botlog_channel.send(embed=embed, view=view)
+            await loa_channel.send(embed=embed, view=view)
             count += 1
 
         await interaction.response.send_message(
-            f"✅ Sent **{count}** pending LOA(s) to {botlog_channel.mention}.",
+            f"✅ Sent **{count}** pending LOA(s) to {loa_channel.mention}.",
             ephemeral=True,
         )
 
