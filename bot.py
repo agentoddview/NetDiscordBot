@@ -13,9 +13,11 @@ if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable not set.")
 
 intents = discord.Intents.default()
+intents = discord.Intents.default()
 intents.members = True
 intents.guilds = True
-intents.reactions = True  # needed for shift reaction tracking
+intents.reactions = True
+intents.presences = True  # <-- THIS MUST BE TRUE
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -53,4 +55,5 @@ async def ping(ctx: commands.Context):
 
 if __name__ == "__main__":
     bot.run(TOKEN)
+
 
