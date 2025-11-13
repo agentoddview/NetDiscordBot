@@ -11,7 +11,7 @@ def get_connection():
 
 
 def init_db():
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist and migrate older schemas."""
     conn = get_connection()
     cur = conn.cursor()
 
@@ -28,7 +28,7 @@ def init_db():
         """
     )
 
-    # LOA tracking: basic example
+    # LOA tracking
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS loas (
@@ -43,15 +43,21 @@ def init_db():
         """
     )
 
-    # Guild settings (e.g., mod log channel)
+    # Guild settings (mod log channel, bot log channel)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS guild_settings (
             guild_id INTEGER PRIMARY KEY,
-            modlog_channel_id INTEGER
+            modlog_channel_id INTEGER,
+            botlog_channel_id INTEGER
         )
         """
     )
+    # Migrate older versions that might not have botlog_channel_id
+    cur.execute("PRAGMA table_info(guild_settings)")
+    cols = {row["name"] for row in cur.fetchall()}
+    if "botlog_channel_id" not in cols:
+        cur.execute("ALTER TABLE guild_settings ADD COLUMN botlog_channel_id INTEGER")
 
     # Clock periods: last reset for each guild (for weekly quotas)
     cur.execute(
