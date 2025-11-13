@@ -76,6 +76,72 @@ class ClockAdminView(discord.ui.View):
         )
 
 
+class ClockManageView(discord.ui.View):
+    """Shift management panel for a single user: Start / Pause / End."""
+
+    def __init__(self, cog: "ShiftTracking", member: discord.Member):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.member_id = member.id
+        self.guild_id = member.guild.id
+
+    async def _check_owner(self, interaction: discord.Interaction) -> bool:
+        member = interaction.user
+        assert isinstance(member, discord.Member)
+        if member.id == self.member_id:
+            return True
+        # allow senior staff to click others' panels
+        if member.guild_permissions.administrator or any(
+            r.id == SENIOR_SUPERVISOR_ROLE_ID for r in member.roles
+        ):
+            return True
+        await interaction.response.send_message(
+            "❌ This panel belongs to someone else.", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.success)
+    async def start_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if not await self._check_owner(interaction):
+            return
+        ok, msg = self.cog._start_shift(self.guild_id, self.member_id)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @discord.ui.button(label="Pause", style=discord.ButtonStyle.secondary)
+    async def pause_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if not await self._check_owner(interaction):
+            return
+        ok, dur = self.cog._end_shift(self.guild_id, self.member_id)
+        if not ok:
+            await interaction.response.send_message(
+                "You don't have an active clock to pause.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            f"⏱ Clock paused. This segment: **{dur}**", ephemeral=True
+        )
+
+    @discord.ui.button(label="End", style=discord.ButtonStyle.danger)
+    async def end_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if not await self._check_owner(interaction):
+            return
+        ok, dur = self.cog._end_shift(self.guild_id, self.member_id)
+        if not ok:
+            await interaction.response.send_message(
+                "You don't have an active clock to end.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            f"✅ Clock ended. Last segment: **{dur}**", ephemeral=True
+        )
+
+
 class ShiftTracking(commands.Cog):
     """Slash-command based clock system for staff."""
 
@@ -112,6 +178,23 @@ class ShiftTracking(commands.Cog):
                 (user_id, guild_id),
             )
             return cur.fetchone()
+
+    def _start_shift(self, guild_id: int, user_id: int):
+        if self._get_open_shift(guild_id, user_id):
+            return False, "⏱ You already have an active clock."
+        now = datetime.now(timezone.utc).isoformat()
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO shifts (user_id, guild_id, start_time)
+                VALUES (?, ?, ?)
+                """,
+                (user_id, guild_id, now),
+            )
+            conn.commit()
+        local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return True, f"✅ Your clock has started at **{local}**."
 
     def _end_shift(self, guild_id: int, user_id: int):
         """End a user's current shift. Returns (ok, duration_str or None)."""
@@ -153,7 +236,6 @@ class ShiftTracking(commands.Cog):
         if row and row["reset_at"]:
             return datetime.fromisoformat(row["reset_at"])
 
-        # Default: very old time so everything counts until first reset
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
     def _set_reset_time(self, guild_id: int, when: datetime):
@@ -235,7 +317,34 @@ class ShiftTracking(commands.Cog):
         )
         return total_seconds
 
-    # ---------- slash commands ----------
+    def _get_all_time_stats(self, guild_id: int, user_id: int):
+        """Return (count, total_secs, average_secs) from all completed shifts."""
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT start_time, end_time
+                FROM shifts
+                WHERE user_id = ? AND guild_id = ? AND end_time IS NOT NULL
+                """,
+                (user_id, guild_id),
+            )
+            rows = cur.fetchall()
+
+        count = 0
+        total = 0
+        for row in rows:
+            start_dt = datetime.fromisoformat(row["start_time"])
+            end_dt = datetime.fromisoformat(row["end_time"])
+            total += int((end_dt - start_dt).total_seconds())
+            count += 1
+
+        avg = total // count if count else 0
+        return count, total, avg
+
+    # ---------- slash commands (existing ones) ----------
+    # (startclock, endclock, clocktotal, clockadmin, clockboard, clockadjust, clockreset)
+    # ... unchanged from previous version, except they now use _start_shift
 
     @app_commands.command(
         name="startclock",
@@ -251,32 +360,8 @@ class ShiftTracking(commands.Cog):
             )
             return
 
-        user = interaction.user
-
-        if self._get_open_shift(guild.id, user.id):
-            await interaction.response.send_message(
-                "⏱ You already have an active clock. Use `/endclock` first.",
-                ephemeral=True,
-            )
-            return
-
-        now = datetime.now(timezone.utc).isoformat()
-        with get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                INSERT INTO shifts (user_id, guild_id, start_time)
-                VALUES (?, ?, ?)
-                """,
-                (user.id, guild.id, now),
-            )
-            conn.commit()
-
-        local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        await interaction.response.send_message(
-            f"✅ Your clock has started at **{local}**.",
-            ephemeral=True,
-        )
+        ok, msg = self._start_shift(guild.id, interaction.user.id)
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @app_commands.command(
         name="endclock",
@@ -410,8 +495,7 @@ class ShiftTracking(commands.Cog):
             )
             return
 
-        # Collect all members that are Supervisor or Senior Supervisor
-        supervisors: list[discord.Member] = []
+        supervisors: List[discord.Member] = []
         for m in guild.members:
             if m.bot:
                 continue
@@ -436,7 +520,6 @@ class ShiftTracking(commands.Cog):
             total_secs = self._get_period_total_seconds(guild.id, m.id)
             board.append((m, total_secs))
 
-        # Sort by most time clocked
         board.sort(key=lambda x: x[1], reverse=True)
 
         lines = []
@@ -551,6 +634,55 @@ class ShiftTracking(commands.Cog):
             ephemeral=True,
         )
 
+    # ---------- NEW: /clockmanage ----------
+
+    @app_commands.command(
+        name="clockmanage",
+        description="Open your shift management panel (Start / Pause / End).",
+    )
+    @app_commands.guild_only()
+    async def clockmanage(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        member = interaction.user
+        assert isinstance(member, discord.Member)
+
+        # optionally require Supervisor role to use manage panel
+        role_ids = {r.id for r in member.roles}
+        if SUPERVISOR_ROLE_ID not in role_ids and not (
+            member.guild_permissions.administrator
+            or any(r.id == SENIOR_SUPERVISOR_ROLE_ID for r in member.roles)
+        ):
+            await interaction.response.send_message(
+                "❌ You must be a Supervisor to use `/clockmanage`.",
+                ephemeral=True,
+            )
+            return
+
+        count, total, avg = self._get_all_time_stats(guild.id, member.id)
+
+        embed = discord.Embed(
+            title="Shift Management",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="All Time Information", value="\u200b", inline=False)
+        embed.add_field(name="Shift Count", value=str(count), inline=True)
+        embed.add_field(
+            name="Total Duration",
+            value=self._format_duration(total),
+            inline=True,
+        )
+        embed.add_field(
+            name="Average Duration",
+            value=self._format_duration(avg),
+            inline=True,
+        )
+        embed.add_field(
+            name="Shift Type", value="Supervisor Shifts", inline=False
+        )
+
+        view = ClockManageView(self, member)
+        await interaction.response.send_message(embed=embed, view=view)
+
 
 async def setup(bot: commands.Bot):
     cog = ShiftTracking(bot)
@@ -564,3 +696,4 @@ async def setup(bot: commands.Bot):
     bot.tree.add_command(cog.clockboard, guild=guild)
     bot.tree.add_command(cog.clockadjust, guild=guild)
     bot.tree.add_command(cog.clockreset, guild=guild)
+    bot.tree.add_command(cog.clockmanage, guild=guild)
