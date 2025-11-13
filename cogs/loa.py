@@ -137,29 +137,24 @@ class LOATracking(commands.Cog):
 
     # ---------- helpers: DB ----------
 
-    def _get_botlog_channel_id(self, guild_id: int) -> int | None:
-        with get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT botlog_channel_id FROM guild_settings WHERE guild_id = ?",
-                (guild_id,),
-            )
-            row = cur.fetchone()
-        return row["botlog_channel_id"] if row and row["botlog_channel_id"] else None
+   # ---------- helpers: DB ----------
 
-    def _get_loa(self, loa_id: int):
-        with get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM loas WHERE id = ?", (loa_id,))
-            return cur.fetchone()
+def _get_botlog_channel_id(self, guild_id: int) -> int | None:
+    ...
+    return row["botlog_channel_id"] if row and row["botlog_channel_id"] else None
 
-    async def _send_botlog(self, guild: discord.Guild, embed: discord.Embed):
-        channel_id = self._get_botlog_channel_id(guild.id)
-        if not channel_id:
-            return
-        channel = guild.get_channel(channel_id)
-        if channel:
-            await channel.send(embed=embed)
+def _get_loa_channel_id(self, guild_id: int) -> int | None:
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT loa_channel_id FROM guild_settings WHERE guild_id = ?",
+            (guild_id,),
+        )
+        row = cur.fetchone()
+    return row["loa_channel_id"] if row and row["loa_channel_id"] else None
+
+def _get_loa(self, loa_id: int):
+    ...
 
     # ---------- helpers: actions ----------
 
@@ -486,7 +481,7 @@ class LOATracking(commands.Cog):
             )
             return
 
-        botlog_channel_id = self._get_botlog_channel_id(guild.id)
+        loa_channel_id = self._get_loa_channel_id(guild.id)
         if not botlog_channel_id:
             await interaction.response.send_message(
                 "Net Bot Logs channel is not configured. Use `/netconfig` first.",
