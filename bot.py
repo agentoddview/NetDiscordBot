@@ -13,24 +13,19 @@ if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable not set.")
 
 intents = discord.Intents.default()
-intents.message_content = True
 intents.members = True
 intents.guilds = True
+intents.reactions = True  # needed for shift reaction tracking
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 @bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    print("------")
-
-
-@bot.event
 async def setup_hook():
-    """Load all cogs when the bot starts."""
+    """Load cogs before the bot becomes ready."""
     initial_extensions = [
-        "cogs.shift_tracking",
+        "cogs.net_commands",     # your original slash commands + shift engine
+        "cogs.shift_tracking",   # new Trident-style tracker (optional)
         "cogs.loa",
         "cogs.modlog",
     ]
@@ -41,6 +36,12 @@ async def setup_hook():
             print(f"Loaded extension {ext}")
         except Exception as e:
             print(f"Failed to load extension {ext}: {e}")
+
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    print("------")
 
 
 @bot.command(name="ping")
