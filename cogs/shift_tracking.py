@@ -3,17 +3,17 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timezone
 from typing import List
-from presence_state import is_in_game
 
 from database import get_connection, init_db
+from presence_state import is_in_game
 
 GUILD_ID = 882441222487162912  # NE Transit guild
 
 # Roles
-SUPERVISOR_ROLE_ID = 947288094804176957          # "Supervisor"
+SUPERVISOR_ROLE_ID = 947288094804176957  # "Supervisor"
 SENIOR_SUPERVISOR_ROLE_ID = 1393088300239159467  # Senior Supervisor
-LEAD_SUPERVISOR_ROLE_ID = 1351333124965142600    # Lead Supervisor
-ONLINE_ROLE_ID = 1392996333073203211             # in-game online role
+LEAD_SUPERVISOR_ROLE_ID = 1351333124965142600  # Lead Supervisor
+ONLINE_ROLE_ID = 1392996333073203211  # in-game online role
 
 # Quota threshold (seconds)
 WEEKLY_QUOTA_SECONDS = 4 * 60 * 60  # 4 hours
@@ -37,7 +37,9 @@ class ClockAdminView(discord.ui.View):
             desc = f"User ID: {user_id}"
             options.append(
                 discord.SelectOption(
-                    label=label[:100], description=desc[:100], value=str(user_id)
+                    label=label[:100],
+                    description=desc[:100],
+                    value=str(user_id),
                 )
             )
 
@@ -90,11 +92,14 @@ class ClockManageView(discord.ui.View):
     async def _check_owner(self, interaction: discord.Interaction) -> bool:
         member = interaction.user
         assert isinstance(member, discord.Member)
+
         if member.id == self.member_id:
             return True
+
         # allow senior staff / admins to use others' panels
         if self.cog._is_senior_plus(member):
             return True
+
         await interaction.response.send_message(
             "❌ This panel belongs to someone else.", ephemeral=True
         )
@@ -104,9 +109,11 @@ class ClockManageView(discord.ui.View):
         guild = interaction.guild
         if guild is None:
             return
+
         member = guild.get_member(self.member_id)
         if member is None:
             return
+
         new_embed = self.cog._build_clockmanage_embed(guild, member)
         await interaction.response.edit_message(embed=new_embed, view=self)
 
@@ -116,10 +123,12 @@ class ClockManageView(discord.ui.View):
     ):
         if not await self._check_owner(interaction):
             return
+
         ok, msg = self.cog._start_shift(self.guild_id, self.member_id)
         if not ok:
             await interaction.response.send_message(msg, ephemeral=True)
             return
+
         await self._refresh_embed(interaction)
 
     @discord.ui.button(label="End", style=discord.ButtonStyle.danger)
@@ -128,12 +137,14 @@ class ClockManageView(discord.ui.View):
     ):
         if not await self._check_owner(interaction):
             return
+
         ok, _ = self.cog._end_shift(self.guild_id, self.member_id)
         if not ok:
             await interaction.response.send_message(
                 "You don't have an active clock to end.", ephemeral=True
             )
             return
+
         await self._refresh_embed(interaction)
 
 
@@ -143,6 +154,40 @@ class ShiftTracking(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         init_db()  # ensure tables exist
+
+    # ---------- auto-end webhook call from Roblox ----------
+
+    async def auto_end_for_inactivity(self, user_id: int, reason: str) -> bool:
+        """
+        Called from the Roblox webhook when a player leaves the game or is
+        inactive for 10 minutes.
+
+        user_id is the Discord user ID.
+        Returns True if a clock was ended, False if they had no active clock.
+        """
+        guild = self.bot.get_guild(GUILD_ID)
+        if guild is None:
+            return False
+
+        ok, duration_str = self._end_shift(guild.id, user_id)
+        if not ok:
+            # No active clock for this user
+            return False
+
+        member = guild.get_member(user_id)
+        if member is not None:
+            message = (
+                f"⏱ Your staff clock in **{guild.name}** has been automatically ended.\n"
+                f"Reason: you {reason}.\n"
+                f"This shift lasted **{duration_str}**."
+            )
+            try:
+                await member.send(message)
+            except discord.Forbidden:
+                # Can't DM them; ignore
+                pass
+
+        return True
 
     # ---------- helpers: role checks ----------
 
@@ -165,10 +210,7 @@ class ShiftTracking(commands.Cog):
 
     def _is_lead_plus(self, member: discord.Member) -> bool:
         role_ids = {r.id for r in member.roles}
-        return (
-            LEAD_SUPERVISOR_ROLE_ID in role_ids
-            or member.guild_permissions.administrator
-        )
+        return LEAD_SUPERVISOR_ROLE_ID in role_ids or member.guild_permissions.administrator
 
     # ---------- helpers: formatting ----------
 
@@ -192,8 +234,7 @@ class ShiftTracking(commands.Cog):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT id, start_time
-                FROM shifts
+                SELECT id, start_time FROM shifts
                 WHERE user_id = ? AND guild_id = ? AND end_time IS NULL
                 """,
                 (user_id, guild_id),
@@ -203,6 +244,7 @@ class ShiftTracking(commands.Cog):
     def _start_shift(self, guild_id: int, user_id: int):
         if self._get_open_shift(guild_id, user_id):
             return False, "⏱ You already have an active clock."
+
         now = datetime.now(timezone.utc).isoformat()
         with get_connection() as conn:
             cur = conn.cursor()
@@ -214,11 +256,14 @@ class ShiftTracking(commands.Cog):
                 (user_id, guild_id, now),
             )
             conn.commit()
+
         local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return True, f"✅ Your clock has started at **{local}**."
 
     def _end_shift(self, guild_id: int, user_id: int):
-        """End a user's current shift. Returns (ok, duration_str or None)."""
+        """End a user's current shift.
+
+        Returns (ok, duration_str or None)."""
         row = self._get_open_shift(guild_id, user_id)
         if not row:
             return False, None
@@ -253,10 +298,8 @@ class ShiftTracking(commands.Cog):
                 (guild_id,),
             )
             row = cur.fetchone()
-
-        if row and row["reset_at"]:
-            return datetime.fromisoformat(row["reset_at"])
-
+            if row and row["reset_at"]:
+                return datetime.fromisoformat(row["reset_at"])
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
     def _set_reset_time(self, guild_id: int, when: datetime):
@@ -266,8 +309,8 @@ class ShiftTracking(commands.Cog):
                 """
                 INSERT INTO clock_periods (guild_id, reset_at)
                 VALUES (?, ?)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    reset_at = excluded.reset_at
+                ON CONFLICT(guild_id) DO UPDATE
+                SET reset_at = excluded.reset_at
                 """,
                 (guild_id, when.isoformat()),
             )
@@ -289,7 +332,7 @@ class ShiftTracking(commands.Cog):
                 (guild_id, user_id, since.isoformat()),
             )
             row = cur.fetchone()
-        return int(row["total"] if row and row["total"] is not None else 0)
+            return int(row["total"] if row and row["total"] is not None else 0)
 
     def _add_adjustment(
         self, guild_id: int, user_id: int, seconds: int, when: datetime
@@ -314,8 +357,7 @@ class ShiftTracking(commands.Cog):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT start_time, end_time
-                FROM shifts
+                SELECT start_time, end_time FROM shifts
                 WHERE user_id = ?
                   AND guild_id = ?
                   AND start_time >= ?
@@ -333,9 +375,7 @@ class ShiftTracking(commands.Cog):
                 end_dt = datetime.fromisoformat(row["end_time"])
             total_seconds += int((end_dt - start_dt).total_seconds())
 
-        total_seconds += self._get_adjustment_seconds(
-            guild_id, user_id, period_start
-        )
+        total_seconds += self._get_adjustment_seconds(guild_id, user_id, period_start)
         return total_seconds
 
     def _get_all_time_stats(self, guild_id: int, user_id: int):
@@ -344,9 +384,10 @@ class ShiftTracking(commands.Cog):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT start_time, end_time
-                FROM shifts
-                WHERE user_id = ? AND guild_id = ? AND end_time IS NOT NULL
+                SELECT start_time, end_time FROM shifts
+                WHERE user_id = ?
+                  AND guild_id = ?
+                  AND end_time IS NOT NULL
                 """,
                 (user_id, guild_id),
             )
@@ -389,17 +430,13 @@ class ShiftTracking(commands.Cog):
             value=self._format_duration(avg),
             inline=True,
         )
-        embed.add_field(
-            name="Shift Type", value="Supervisor Shifts", inline=False
-        )
+        embed.add_field(name="Shift Type", value="Supervisor Shifts", inline=False)
         return embed
 
     # ---------- presence → online role ----------
 
     @commands.Cog.listener()
-    async def on_presence_update(
-        self, before: discord.Member, after: discord.Member
-    ):
+    async def on_presence_update(self, before: discord.Member, after: discord.Member):
         """
         Give/remove the 'in-game online' role based on Discord presence.
         - If status is online -> add role
@@ -418,14 +455,12 @@ class ShiftTracking(commands.Cog):
             if after.status is discord.Status.online:
                 if role not in after.roles:
                     await after.add_roles(
-                        role,
-                        reason="In-game online role (status online)",
+                        role, reason="In-game online role (status online)"
                     )
             else:
                 if role in after.roles:
                     await after.remove_roles(
-                        role,
-                        reason="In-game online role (status not online)",
+                        role, reason="In-game online role (status not online)"
                     )
         except discord.Forbidden:
             # Missing permissions to edit roles; nothing we can do
@@ -449,9 +484,19 @@ class ShiftTracking(commands.Cog):
 
         member = interaction.user
         assert isinstance(member, discord.Member)
+
         if not self._is_supervisor_plus(member):
             await interaction.response.send_message(
                 "❌ You must be a Supervisor or higher to use `/startclock`.",
+                ephemeral=True,
+            )
+            return
+
+        # Must be in the Roblox game to start a clock
+        if not is_in_game(member.id):
+            await interaction.response.send_message(
+                "❌ You must be in the Roblox game to start your staff clock.\n"
+                "Join the game first, then run `/startclock` again.",
                 ephemeral=True,
             )
             return
@@ -475,6 +520,7 @@ class ShiftTracking(commands.Cog):
 
         member = interaction.user
         assert isinstance(member, discord.Member)
+
         if not self._is_supervisor_plus(member):
             await interaction.response.send_message(
                 "❌ You must be a Supervisor or higher to use `/endclock`.",
@@ -485,7 +531,7 @@ class ShiftTracking(commands.Cog):
         ok, duration_str = self._end_shift(guild.id, member.id)
         if not ok:
             await interaction.response.send_message(
-                "❌ You do not have an active clock. Use `/startclock` first.",
+                "❌ You do not have an active clock.\nUse `/startclock` first.",
                 ephemeral=True,
             )
             return
@@ -531,10 +577,10 @@ class ShiftTracking(commands.Cog):
         target = member or actor
         total_seconds = self._get_period_total_seconds(guild.id, target.id)
         duration_str = self._format_duration(total_seconds)
-
         period_start = self._get_reset_time(guild.id)
+
         msg = (
-            f"📊 Clocked time for **{target.display_name}** "
+            f" Clocked time for **{target.display_name}** "
             f"(since {period_start.strftime('%Y-%m-%d')}): **{duration_str}**"
         )
         await interaction.response.send_message(msg, ephemeral=True)
@@ -566,8 +612,7 @@ class ShiftTracking(commands.Cog):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT user_id, start_time
-                FROM shifts
+                SELECT user_id, start_time FROM shifts
                 WHERE guild_id = ? AND end_time IS NULL
                 ORDER BY start_time ASC
                 """,
@@ -637,7 +682,6 @@ class ShiftTracking(commands.Cog):
             return
 
         period_start = self._get_reset_time(guild.id)
-
         board = []
         for m in supervisors:
             total_secs = self._get_period_total_seconds(guild.id, m.id)
@@ -707,7 +751,6 @@ class ShiftTracking(commands.Cog):
         current_secs = self._get_period_total_seconds(guild.id, member.id)
         target_secs = int(hours * 3600)
         delta = target_secs - current_secs
-
         now = datetime.now(timezone.utc)
         self._add_adjustment(guild.id, member.id, delta, now)
 
