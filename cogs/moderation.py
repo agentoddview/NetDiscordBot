@@ -11,6 +11,11 @@ from database import get_connection, init_db
 
 GUILD_ID = 882441222487162912  # NE Transit guild
 
+# Role IDs
+SUPERVISOR_ROLE_ID = 947288094804176957          # Supervisor
+SENIOR_SUPERVISOR_ROLE_ID = 1393088300239159467  # Senior Supervisor
+LEAD_SUPERVISOR_ROLE_ID = 1351333124965142600    # Lead Supervisor
+
 PUNISHMENTS = [
     "Warning",
     "Mute",
@@ -115,7 +120,8 @@ class EditModerationConfirmView(discord.ui.View):
     async def _check_perms(self, interaction: discord.Interaction) -> bool:
         member = interaction.user
         assert isinstance(member, discord.Member)
-        if member.guild_permissions.manage_guild or member.guild_permissions.administrator:
+        # Senior Supervisor+ can confirm/cancel edits
+        if self.cog._is_senior_plus(member):
             return True
         await interaction.response.send_message(
             "❌ You are not allowed to edit moderation logs.",
@@ -186,6 +192,25 @@ class Moderation(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         init_db()
+
+    # ---------- helpers: role checks ----------
+
+    def _is_supervisor_plus(self, member: discord.Member) -> bool:
+        role_ids = {r.id for r in member.roles}
+        return (
+            SUPERVISOR_ROLE_ID in role_ids
+            or SENIOR_SUPERVISOR_ROLE_ID in role_ids
+            or LEAD_SUPERVISOR_ROLE_ID in role_ids
+            or member.guild_permissions.administrator
+        )
+
+    def _is_senior_plus(self, member: discord.Member) -> bool:
+        role_ids = {r.id for r in member.roles}
+        return (
+            SENIOR_SUPERVISOR_ROLE_ID in role_ids
+            or LEAD_SUPERVISOR_ROLE_ID in role_ids
+            or member.guild_permissions.administrator
+        )
 
     # ---------- helpers: settings / logging ----------
 
@@ -517,9 +542,19 @@ class Moderation(commands.Cog):
         reason: str,
     ):
         guild = interaction.guild
+        member = interaction.user
+
         if guild is None:
             await interaction.response.send_message(
                 "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        assert isinstance(member, discord.Member)
+        if not self._is_supervisor_plus(member):
+            await interaction.response.send_message(
+                "❌ You must be a Supervisor or higher to use `/moderate`.",
                 ephemeral=True,
             )
             return
@@ -579,7 +614,7 @@ class Moderation(commands.Cog):
 
         data = {
             "guild_id": guild.id,
-            "moderator_id": interaction.user.id,
+            "moderator_id": member.id,
             "roblox_id": roblox_id,
             "username": username,
             "punishment": punishment.value,
@@ -601,7 +636,6 @@ class Moderation(commands.Cog):
     @app_commands.choices(
         punishment=[app_commands.Choice(name=p, value=p) for p in PUNISHMENTS]
     )
-    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.guild_only()
     async def editmoderation(
         self,
@@ -611,9 +645,19 @@ class Moderation(commands.Cog):
         reason: str,
     ):
         guild = interaction.guild
+        member = interaction.user
+
         if guild is None:
             await interaction.response.send_message(
                 "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        assert isinstance(member, discord.Member)
+        if not self._is_senior_plus(member):
+            await interaction.response.send_message(
+                "❌ You must be a Senior Supervisor or higher to use `/editmoderation`.",
                 ephemeral=True,
             )
             return
@@ -664,9 +708,19 @@ class Moderation(commands.Cog):
         roblox_user: str,
     ):
         guild = interaction.guild
+        member = interaction.user
+
         if guild is None:
             await interaction.response.send_message(
                 "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        assert isinstance(member, discord.Member)
+        if not self._is_supervisor_plus(member):
+            await interaction.response.send_message(
+                "❌ You must be a Supervisor or higher to use `/lookup`.",
                 ephemeral=True,
             )
             return
@@ -730,6 +784,8 @@ class Moderation(commands.Cog):
         member: discord.Member | None = None,
     ):
         guild = interaction.guild
+        actor = interaction.user
+
         if guild is None:
             await interaction.response.send_message(
                 "This command can only be used in a server.",
@@ -737,7 +793,15 @@ class Moderation(commands.Cog):
             )
             return
 
-        target = member or interaction.user
+        assert isinstance(actor, discord.Member)
+        if not self._is_supervisor_plus(actor):
+            await interaction.response.send_message(
+                "❌ You must be a Supervisor or higher to use `/modstats`.",
+                ephemeral=True,
+            )
+            return
+
+        target = member or actor
 
         # Moderation stats
         with get_connection() as conn:
