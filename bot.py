@@ -99,18 +99,13 @@ async def get_discord_id_from_bloxlink(roblox_id: int) -> int | None:
 async def handle_roblox_presence(request: web.Request) -> web.Response:
     """
     Endpoint called from Roblox:
-
-    POST /roblox/presence
-    JSON body:
-        {
-          "roblox_id": "123456789",
-          "event": "join" | "leave" | "inactive"
-        }
-    Header:
-        X-Game-Secret: <ROBLOX_GAME_SECRET>
+    ...
     """
+    print("[roblox] incoming presence request")
+
     # Auth check
     if ROBLOX_GAME_SECRET and request.headers.get("X-Game-Secret") != ROBLOX_GAME_SECRET:
+        print("[roblox] bad or missing X-Game-Secret:", request.headers.get("X-Game-Secret"))
         return web.Response(text="unauthorized", status=401)
 
     try:
@@ -219,3 +214,4 @@ async def ping(ctx: commands.Context):
 
 if __name__ == "__main__":
     bot.run(TOKEN)
+
