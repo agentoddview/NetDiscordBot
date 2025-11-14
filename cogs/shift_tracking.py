@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timezone
 from typing import List
+from presence_state import is_in_game
 
 from database import get_connection, init_db
 
