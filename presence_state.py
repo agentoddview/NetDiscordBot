@@ -1,17 +1,17 @@
 # presence_state.py
 from typing import Set
 
-# Set of Discord user IDs who are currently in the Roblox game
+# Discord user IDs currently detected as "in the Roblox game"
 _IN_GAME_DISCORD_IDS: Set[int] = set()
 
 
 def mark_join(discord_id: int) -> None:
-    """Mark a Discord user as 'in game'."""
+    """Mark a Discord user as in-game."""
     _IN_GAME_DISCORD_IDS.add(discord_id)
 
 
 def mark_leave(discord_id: int) -> None:
-    """Mark a Discord user as having left the game."""
+    """Mark a Discord user as no longer in-game."""
     _IN_GAME_DISCORD_IDS.discard(discord_id)
 
 
