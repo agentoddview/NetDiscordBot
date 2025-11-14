@@ -1,217 +1,213 @@
 import os
-from pathlib import Path
-import asyncio
 import json
-
+import logging
+import asyncio
 import aiohttp
 from aiohttp import web
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
 
-from presence_state import mark_join, mark_leave
+# -----------------------------
+# Logging
+# -----------------------------
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("netbot")
 
-# ----------------- env + basic setup -----------------
+# -----------------------------
+# ENVIRONMENT VARIABLES
+# -----------------------------
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+GUILD_ID = int(os.getenv("GUILD_ID"))
+WEB_PORT = int(os.getenv("WEB_PORT", "3000"))
 
-load_dotenv(Path(__file__).parent / ".env")
+BLOXLINK_API_KEY = os.getenv("BLOXLINK_API_KEY")  # REQUIRED
 
-TOKEN = os.getenv("DISCORD_TOKEN")
-if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN environment variable not set.")
-
-# Shared secret used by Roblox game scripts
-ROBLOX_GAME_SECRET = os.getenv("ROBLOX_GAME_SECRET", "")
-WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
-
-# NET guild ID (used for Bloxlink lookups)
-NET_GUILD_ID = int(os.getenv("NET_GUILD_ID", "882441222487162912"))
-
-# Bloxlink Developer API settings
-BLOXLINK_API_KEY = os.getenv("BLOXLINK_API_KEY", "")
-BLOXLINK_API_BASE = os.getenv("BLOXLINK_API_BASE", "https://v3.blox.link/developer")
-
+# -----------------------------
+# DISCORD BOT SETUP
+# -----------------------------
 intents = discord.Intents.default()
 intents.members = True
 intents.guilds = True
-intents.reactions = True
-intents.presences = True  # important for presence listener in ShiftTracking
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# State tracking
+in_game_state = {}     # discord_id: timestamp
+last_activity = {}     # discord_id: timestamp
 
-# ----------------- Bloxlink helper -----------------
+# -----------------------------
+# HELPERS FOR STATE
+# -----------------------------
+def mark_join(discord_id: int):
+    log.info(f"[presence] mark_join {discord_id}")
+    in_game_state[discord_id] = asyncio.get_event_loop().time()
+    last_activity[discord_id] = asyncio.get_event_loop().time()
 
+def mark_leave(discord_id: int):
+    log.info(f"[presence] mark_leave {discord_id}")
+    in_game_state.pop(discord_id, None)
+    last_activity.pop(discord_id, None)
 
+def is_in_game(discord_id: int) -> bool:
+    return discord_id in in_game_state
+
+# -----------------------------
+# BLOXLINK: GET DISCORD ID
+# -----------------------------
 async def get_discord_id_from_bloxlink(roblox_id: int) -> int | None:
     """
-    Use Bloxlink Developer API to resolve a Roblox user ID to the linked
-    Discord user for the NET guild.
+    Returns Discord ID for a Roblox ID via Bloxlink.
 
-    Returns Discord user ID as int, or None if not found.
+    Always returns:
+      - discord_id (int) or
+      - None
+
+    Never throws an exception.
     """
+
     if not BLOXLINK_API_KEY:
-        print("[bloxlink] No API key configured")
+        log.warning("[bloxlink] Missing BLOXLINK_API_KEY!")
         return None
 
-    # NOTE: adjust this path to match your Bloxlink Dev API docs if needed.
-    url = f"{BLOXLINK_API_BASE}/roblox/{roblox_id}"
-
+    url = "https://v3.blox.link/developer/discord"
     headers = {
         "Authorization": BLOXLINK_API_KEY,
-        "Content-Type": "application/json",
+        "Accept": "application/json",
     }
     params = {
-        "guild": str(NET_GUILD_ID),
+        "robloxId": str(roblox_id),
+        "guildId": str(GUILD_ID),
     }
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, params=params) as resp:
-            body = await resp.text()
-            if resp.status != 200:
-                print(f"[bloxlink] lookup failed ({resp.status}): {body}")
-                return None
-
+    try:
+        async with aiohttp.ClientSession() as session:
             try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                print("[bloxlink] invalid JSON response:", body)
+                async with session.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=5,
+                ) as resp:
+
+                    text = await resp.text()
+
+                    if resp.status == 404:
+                        log.info(f"[bloxlink] No link for Roblox {roblox_id}")
+                        return None
+
+                    if resp.status != 200:
+                        log.warning(
+                            f"[bloxlink] Unexpected {resp.status}: {text[:200]}"
+                        )
+                        return None
+
+                    try:
+                        data = json.loads(text)
+                    except Exception:
+                        log.warning("[bloxlink] JSON decode error")
+                        return None
+
+                    raw_id = (
+                        data.get("discordId")
+                        or data.get("discord_id")
+                        or data.get("id")
+                    )
+
+                    try:
+                        return int(raw_id)
+                    except Exception:
+                        return None
+
+            except asyncio.TimeoutError:
+                log.warning("[bloxlink] Timeout")
                 return None
 
-            print(f"[bloxlink] response for Roblox {roblox_id}: {data}")
-
-            # TODO: tweak this to match the exact structure you see printed
-            # in logs from Bloxlink. This is a generic fallback.
-            discord_id_str = str(
-                data.get("discord_id")
-                or data.get("id")
-                or (data.get("user") or {}).get("id", "")
-            )
-
-            if not discord_id_str.isdigit():
-                return None
-
-            return int(discord_id_str)
+    except aiohttp.ClientError as e:
+        log.warning(f"[bloxlink] Network error: {e}")
+        return None
 
 
-# ----------------- Roblox webhook -----------------
+# -----------------------------
+# AIOHTTP WEB SERVER
+# -----------------------------
+routes = web.RouteTableDef()
 
-
-async def handle_roblox_presence(request: web.Request) -> web.Response:
+@routes.post("/roblox/presence")
+async def handle_roblox_presence(request):
     """
-    Endpoint called from Roblox:
-    ...
+    Roblox server calls:
+    POST /roblox/presence
+    { "roblox_id": 123 }
     """
-    print("[roblox] incoming presence request")
+    data = await request.json()
+    roblox_id = data.get("roblox_id")
 
-    # Auth check
-    if ROBLOX_GAME_SECRET and request.headers.get("X-Game-Secret") != ROBLOX_GAME_SECRET:
-        print("[roblox] bad or missing X-Game-Secret:", request.headers.get("X-Game-Secret"))
-        return web.Response(text="unauthorized", status=401)
+    log.info(f"[roblox] incoming presence request roblox_id={roblox_id}")
 
-    try:
-        data = await request.json()
-    except json.JSONDecodeError:
-        return web.Response(text="invalid json", status=400)
-
-    event = (data.get("event") or "").lower()
-    roblox_id_raw = data.get("roblox_id")
-
-    if not roblox_id_raw or event not in {"join", "leave", "inactive"}:
-        return web.Response(text="missing or invalid fields", status=400)
-
-    try:
-        roblox_id = int(roblox_id_raw)
-    except (TypeError, ValueError):
-        return web.Response(text="invalid roblox_id", status=400)
-
-    # Roblox -> Discord via Bloxlink
     discord_id = await get_discord_id_from_bloxlink(roblox_id)
+
     if discord_id is None:
-        return web.Response(text="no linked discord account", status=404)
+        return web.Response(status=404, text="no linked discord account")
 
-    if event == "join":
+    # Update presence timestamps
+    last_activity[discord_id] = asyncio.get_event_loop().time()
+
+    if not is_in_game(discord_id):
         mark_join(discord_id)
-        print(f"[roblox] join from Roblox {roblox_id} -> Discord {discord_id}")
-        return web.Response(text="ok")
 
-    if event == "leave":
-        mark_leave(discord_id)
-        print(f"[roblox] leave from Roblox {roblox_id} -> Discord {discord_id}")
-        cog = bot.get_cog("ShiftTracking")
-        if cog is not None:
-            try:
-                await cog.auto_end_for_inactivity(
-                    discord_id,
-                    reason="left the Roblox game",
-                )
-            except Exception as e:
-                print(f"[roblox] auto_end_for_inactivity (leave) error: {e}")
-        return web.Response(text="ok")
+    return web.Response(status=200, text="ok")
 
-    # event == "inactive"
-    print(f"[roblox] inactive from Roblox {roblox_id} -> Discord {discord_id}")
-    cog = bot.get_cog("ShiftTracking")
-    if cog is not None:
-        try:
-            await cog.auto_end_for_inactivity(
-                discord_id,
-                reason="were inactive in Roblox for 10 minutes",
-            )
-        except Exception as e:
-            print(f"[roblox] auto_end_for_inactivity (inactive) error: {e}")
-    return web.Response(text="ok")
+# -----------------------------
+# AUTO-AFK CHECKER
+# -----------------------------
+async def afk_loop():
+    while True:
+        now = asyncio.get_event_loop().time()
 
+        to_remove = []
 
-async def start_webserver() -> None:
-    """Start the aiohttp web server that Roblox talks to."""
+        for discord_id in list(in_game_state.keys()):
+            last = last_activity.get(discord_id, 0)
+            if now - last > 600:  # 10 minutes
+                log.info(f"[presence] AFK logout {discord_id}")
+                mark_leave(discord_id)
+
+                guild = bot.get_guild(GUILD_ID)
+                member = guild.get_member(discord_id)
+                if member:
+                    try:
+                        await member.send(
+                            "⏳ You were removed from your shift due to inactivity."
+                        )
+                    except:
+                        pass
+
+        await asyncio.sleep(30)
+
+# -----------------------------
+# DISCORD EVENTS
+# -----------------------------
+@bot.event
+async def on_ready():
+    log.info(f"Logged in as {bot.user}")
+    asyncio.create_task(afk_loop())
+
+# -----------------------------
+# START WEB + DISCORD BOT
+# -----------------------------
+async def main():
     app = web.Application()
-    app.add_routes([web.post("/roblox/presence", handle_roblox_presence)])
+    app.add_routes(routes)
 
     runner = web.AppRunner(app)
     await runner.setup()
+
     site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
     await site.start()
-    print(f"[web] Roblox presence webhook listening on 0.0.0.0:{WEB_PORT}")
 
+    log.info(f"[web] Listening on 0.0.0.0:{WEB_PORT}")
 
-# ----------------- Discord bot lifecycle -----------------
-
-
-@bot.event
-async def setup_hook():
-    """Load cogs before the bot becomes ready."""
-    initial_extensions = [
-        "cogs.net_commands",  # slash commands + shift engine
-        "cogs.shift_tracking",  # clock system
-        "cogs.loa",  # LOA system
-        "cogs.modlog",  # mod logs
-        "cogs.config",  # /netconfig
-        "cogs.moderation",  # /moderate
-    ]
-
-    for ext in initial_extensions:
-        try:
-            await bot.load_extension(ext)
-            print(f"Loaded extension {ext}")
-        except Exception as e:
-            print(f"Failed to load extension {ext}: {e}")
-
-
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    print("------")
-
-    if not getattr(bot, "_webserver_started", False):
-        bot.loop.create_task(start_webserver())
-        bot._webserver_started = True
-
-
-@bot.command(name="ping")
-async def ping(ctx: commands.Context):
-    await ctx.send("Pong!")
-
+    await bot.start(DISCORD_TOKEN)
 
 if __name__ == "__main__":
-    bot.run(TOKEN)
-
+    asyncio.run(main())
