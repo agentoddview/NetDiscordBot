@@ -54,78 +54,103 @@ def is_in_game(discord_id: int) -> bool:
 # -----------------------------
 # BLOXLINK: GET DISCORD ID
 # -----------------------------
+BLOXLINK_API_KEY = os.getenv("BLOXLINK_API_KEY")
+BLOXLINK_BASE_URL = os.getenv("BLOXLINK_BASE_URL", "https://api.blox.link")
+
+
 async def get_discord_id_from_bloxlink(roblox_id: int) -> int | None:
     """
-    Returns Discord ID for a Roblox ID via Bloxlink.
+    Look up Discord user ID(s) for a Roblox user ID via Bloxlink.
 
-    Always returns:
-      - discord_id (int) or
-      - None
+    Uses:
+      GET https://api.blox.link/v4/public/guilds/:serverID/roblox-to-discord/:robloxID
 
-    Never throws an exception.
+    Returns:
+      - first Discord ID as int, or
+      - None if no link or any error.
     """
-
     if not BLOXLINK_API_KEY:
-        log.warning("[bloxlink] Missing BLOXLINK_API_KEY!")
+        log.warning("[bloxlink] BLOXLINK_API_KEY is not set; skipping lookup")
         return None
 
-    url = "https://v3.blox.link/developer/discord"
+    # Build URL from docs:
+    # https://api.blox.link/v4/public/guilds/:serverID/roblox-to-discord/:robloxID
+    base = BLOXLINK_BASE_URL.rstrip("/")
+    url = f"{base}/v4/public/guilds/{GUILD_ID}/roblox-to-discord/{roblox_id}"
+
     headers = {
         "Authorization": BLOXLINK_API_KEY,
         "Accept": "application/json",
     }
-    params = {
-        "robloxId": str(roblox_id),
-        "guildId": str(GUILD_ID),
-    }
 
     try:
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(
-                    url,
-                    headers=headers,
-                    params=params,
-                    timeout=5,
-                ) as resp:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as resp:
+                text = await resp.text()
 
-                    text = await resp.text()
-
-                    if resp.status == 404:
-                        log.info(f"[bloxlink] No link for Roblox {roblox_id}")
-                        return None
-
-                    if resp.status != 200:
-                        log.warning(
-                            f"[bloxlink] Unexpected {resp.status}: {text[:200]}"
-                        )
-                        return None
-
-                    try:
-                        data = json.loads(text)
-                    except Exception:
-                        log.warning("[bloxlink] JSON decode error")
-                        return None
-
-                    raw_id = (
-                        data.get("discordId")
-                        or data.get("discord_id")
-                        or data.get("id")
+                if resp.status == 404:
+                    log.info(
+                        "[bloxlink] roblox_id %s has no linked discord in guild %s (404). body=%s",
+                        roblox_id,
+                        GUILD_ID,
+                        text[:200],
                     )
+                    return None
 
-                    try:
-                        return int(raw_id)
-                    except Exception:
-                        return None
+                if resp.status != 200:
+                    log.warning(
+                        "[bloxlink] unexpected status %s for roblox_id %s; body=%s",
+                        resp.status,
+                        roblox_id,
+                        text[:200],
+                    )
+                    return None
 
-            except asyncio.TimeoutError:
-                log.warning("[bloxlink] Timeout")
-                return None
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    log.warning(
+                        "[bloxlink] JSON parse error for roblox_id %s; body=%s",
+                        roblox_id,
+                        text[:200],
+                    )
+                    return None
+
+                # Per your screenshot: { "discordIDs": ["..."], "resolved": {} }
+                ids = data.get("discordIDs") or data.get("discord_ids")
+                if not isinstance(ids, list) or not ids:
+                    log.warning(
+                        "[bloxlink] no discordIDs array in response for roblox_id %s; data=%s",
+                        roblox_id,
+                        data,
+                    )
+                    return None
+
+                # Just use the first ID
+                first_id = ids[0]
+                try:
+                    return int(first_id)
+                except (TypeError, ValueError):
+                    log.warning(
+                        "[bloxlink] unexpected discordID %r for roblox_id %s",
+                        first_id,
+                        roblox_id,
+                    )
+                    return None
 
     except aiohttp.ClientError as e:
-        log.warning(f"[bloxlink] Network error: {e}")
-        return None
+        # Handles DNS / connection / SSL errors etc. without crashing the webhook
+        log.warning(
+            "[bloxlink] network error talking to %s for roblox_id %s: %r",
+            url,
+            roblox_id,
+            e,
+        )
+    except Exception:
+        log.exception("[bloxlink] unexpected error while looking up roblox_id %s", roblox_id)
 
+    return None
 
 # -----------------------------
 # AIOHTTP WEB SERVER
@@ -211,3 +236,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
