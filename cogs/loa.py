@@ -7,7 +7,10 @@ from typing import List
 from database import get_connection, init_db
 
 GUILD_ID = 882441222487162912
-SENIOR_SUPERVISOR_ROLE_ID = 1393088300239159467  # LOA management
+
+SUPERVISOR_ROLE_ID = 947288094804176957          # Supervisor
+SENIOR_SUPERVISOR_ROLE_ID = 1393088300239159467  # Senior Supervisor
+LEAD_SUPERVISOR_ROLE_ID = 1351333124965142600    # Lead Supervisor
 
 
 class LOAApprovalView(discord.ui.View):
@@ -31,8 +34,8 @@ class LOAApprovalView(discord.ui.View):
 
         member = interaction.user
         assert isinstance(member, discord.Member)
-        has_role = any(r.id == SENIOR_SUPERVISOR_ROLE_ID for r in member.roles)
-        if not (has_role or member.guild_permissions.administrator):
+        # LOA decisions: Senior Supervisor+
+        if not self.cog._is_senior_plus(member):
             await interaction.response.send_message(
                 "❌ You are not allowed to manage LOAs.", ephemeral=True
             )
@@ -123,6 +126,7 @@ class LOAAdminView(discord.ui.View):
             )
             return
 
+        # LOA admin panel itself is permission-gated in the command.
         loa_id = int(self.children[0].values[0])
         ok, msg = await self.cog._end_loa_early(loa_id, ended_by=interaction.user)
         await interaction.response.send_message(msg, ephemeral=True)
@@ -134,6 +138,32 @@ class LOATracking(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         init_db()
+
+    # ---------- helpers: role checks ----------
+
+    def _is_supervisor_plus(self, member: discord.Member) -> bool:
+        role_ids = {r.id for r in member.roles}
+        return (
+            SUPERVISOR_ROLE_ID in role_ids
+            or SENIOR_SUPERVISOR_ROLE_ID in role_ids
+            or LEAD_SUPERVISOR_ROLE_ID in role_ids
+            or member.guild_permissions.administrator
+        )
+
+    def _is_senior_plus(self, member: discord.Member) -> bool:
+        role_ids = {r.id for r in member.roles}
+        return (
+            SENIOR_SUPERVISOR_ROLE_ID in role_ids
+            or LEAD_SUPERVISOR_ROLE_ID in role_ids
+            or member.guild_permissions.administrator
+        )
+
+    def _is_lead_plus(self, member: discord.Member) -> bool:
+        role_ids = {r.id for r in member.roles}
+        return (
+            LEAD_SUPERVISOR_ROLE_ID in role_ids
+            or member.guild_permissions.administrator
+        )
 
     # ---------- helpers: DB / channels ----------
 
@@ -375,6 +405,22 @@ class LOATracking(commands.Cog):
     )
     @app_commands.guild_only()
     async def loa_help(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        member = interaction.user
+        if guild is None:
+            await interaction.response.send_message(
+                "This command can only be used in a server.", ephemeral=True
+            )
+            return
+
+        assert isinstance(member, discord.Member)
+        if not self._is_supervisor_plus(member):
+            await interaction.response.send_message(
+                "❌ You must be a Supervisor or higher to use `/loa`.",
+                ephemeral=True,
+            )
+            return
+
         msg = (
             "**LOA Commands:**\n"
             "`/loarequest <days> <reason>` - Request an LOA.\n"
@@ -401,9 +447,19 @@ class LOATracking(commands.Cog):
     ):
         user_id = interaction.user.id
         guild = interaction.guild
+        member = interaction.user
+
         if guild is None:
             await interaction.response.send_message(
                 "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        assert isinstance(member, discord.Member)
+        if not self._is_supervisor_plus(member):
+            await interaction.response.send_message(
+                "❌ You must be a Supervisor or higher to request an LOA.",
                 ephemeral=True,
             )
             return
@@ -471,9 +527,19 @@ class LOATracking(commands.Cog):
     @app_commands.guild_only()
     async def loalist(self, interaction: discord.Interaction):
         guild = interaction.guild
+        member = interaction.user
+
         if guild is None:
             await interaction.response.send_message(
                 "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        assert isinstance(member, discord.Member)
+        if not self._is_supervisor_plus(member):
+            await interaction.response.send_message(
+                "❌ You must be a Supervisor or higher to use `/loalist`.",
                 ephemeral=True,
             )
             return
@@ -533,8 +599,8 @@ class LOATracking(commands.Cog):
 
         member = interaction.user
         assert isinstance(member, discord.Member)
-        has_role = any(r.id == SENIOR_SUPERVISOR_ROLE_ID for r in member.roles)
-        if not (has_role or member.guild_permissions.administrator):
+        # Keep this as Senior Supervisor+ per original design
+        if not self._is_senior_plus(member):
             await interaction.response.send_message(
                 "❌ You must be a Senior Supervisor to use `/loafeed`.",
                 ephemeral=True,
@@ -600,10 +666,10 @@ class LOATracking(commands.Cog):
 
         member = interaction.user
         assert isinstance(member, discord.Member)
-        has_role = any(r.id == SENIOR_SUPERVISOR_ROLE_ID for r in member.roles)
-        if not (has_role or member.guild_permissions.administrator):
+        # Lead Supervisor+ for LOA admin
+        if not self._is_lead_plus(member):
             await interaction.response.send_message(
-                "❌ You must be a Senior Supervisor to use `/loaadmin`.",
+                "❌ You must be a Lead Supervisor or higher to use `/loaadmin`.",
                 ephemeral=True,
             )
             return
