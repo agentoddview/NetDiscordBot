@@ -10,8 +10,8 @@ GUILD_ID = 882441222487162912  # NE Transit guild
 
 # Roles
 SUPERVISOR_ROLE_ID = 947288094804176957          # "Supervisor"
-SENIOR_SUPERVISOR_ROLE_ID = 1393088300239159467  # can use /clockadmin + /clockadjust
-LEAD_SUPERVISOR_ROLE_ID = 1351333124965142600    # can use /clockreset
+SENIOR_SUPERVISOR_ROLE_ID = 1393088300239159467  # Senior Supervisor
+LEAD_SUPERVISOR_ROLE_ID = 1351333124965142600    # Lead Supervisor
 ONLINE_ROLE_ID = 1392996333073203211             # in-game online role
 
 # Quota threshold (seconds)
@@ -92,9 +92,7 @@ class ClockManageView(discord.ui.View):
         if member.id == self.member_id:
             return True
         # allow senior staff / admins to use others' panels
-        if member.guild_permissions.administrator or any(
-            r.id == SENIOR_SUPERVISOR_ROLE_ID for r in member.roles
-        ):
+        if self.cog._is_senior_plus(member):
             return True
         await interaction.response.send_message(
             "❌ This panel belongs to someone else.", ephemeral=True
@@ -144,6 +142,32 @@ class ShiftTracking(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         init_db()  # ensure tables exist
+
+    # ---------- helpers: role checks ----------
+
+    def _is_supervisor_plus(self, member: discord.Member) -> bool:
+        role_ids = {r.id for r in member.roles}
+        return (
+            SUPERVISOR_ROLE_ID in role_ids
+            or SENIOR_SUPERVISOR_ROLE_ID in role_ids
+            or LEAD_SUPERVISOR_ROLE_ID in role_ids
+            or member.guild_permissions.administrator
+        )
+
+    def _is_senior_plus(self, member: discord.Member) -> bool:
+        role_ids = {r.id for r in member.roles}
+        return (
+            SENIOR_SUPERVISOR_ROLE_ID in role_ids
+            or LEAD_SUPERVISOR_ROLE_ID in role_ids
+            or member.guild_permissions.administrator
+        )
+
+    def _is_lead_plus(self, member: discord.Member) -> bool:
+        role_ids = {r.id for r in member.roles}
+        return (
+            LEAD_SUPERVISOR_ROLE_ID in role_ids
+            or member.guild_permissions.administrator
+        )
 
     # ---------- helpers: formatting ----------
 
@@ -380,7 +404,6 @@ class ShiftTracking(commands.Cog):
         - If status is online -> add role
         - Otherwise -> remove role
         """
-        # Only care about our main guild
         if after.guild is None or after.guild.id != GUILD_ID:
             return
         if after.bot:
@@ -423,7 +446,16 @@ class ShiftTracking(commands.Cog):
             )
             return
 
-        ok, msg = self._start_shift(guild.id, interaction.user.id)
+        member = interaction.user
+        assert isinstance(member, discord.Member)
+        if not self._is_supervisor_plus(member):
+            await interaction.response.send_message(
+                "❌ You must be a Supervisor or higher to use `/startclock`.",
+                ephemeral=True,
+            )
+            return
+
+        ok, msg = self._start_shift(guild.id, member.id)
         await interaction.response.send_message(msg, ephemeral=True)
 
     @app_commands.command(
@@ -440,7 +472,16 @@ class ShiftTracking(commands.Cog):
             )
             return
 
-        ok, duration_str = self._end_shift(guild.id, interaction.user.id)
+        member = interaction.user
+        assert isinstance(member, discord.Member)
+        if not self._is_supervisor_plus(member):
+            await interaction.response.send_message(
+                "❌ You must be a Supervisor or higher to use `/endclock`.",
+                ephemeral=True,
+            )
+            return
+
+        ok, duration_str = self._end_shift(guild.id, member.id)
         if not ok:
             await interaction.response.send_message(
                 "❌ You do not have an active clock. Use `/startclock` first.",
@@ -477,7 +518,16 @@ class ShiftTracking(commands.Cog):
             )
             return
 
-        target = member or interaction.user
+        actor = interaction.user
+        assert isinstance(actor, discord.Member)
+        if not self._is_supervisor_plus(actor):
+            await interaction.response.send_message(
+                "❌ You must be a Supervisor or higher to use `/clocktotal`.",
+                ephemeral=True,
+            )
+            return
+
+        target = member or actor
         total_seconds = self._get_period_total_seconds(guild.id, target.id)
         duration_str = self._format_duration(total_seconds)
 
@@ -504,10 +554,9 @@ class ShiftTracking(commands.Cog):
 
         member = interaction.user
         assert isinstance(member, discord.Member)
-        has_role = any(r.id == SENIOR_SUPERVISOR_ROLE_ID for r in member.roles)
-        if not (has_role or member.guild_permissions.administrator):
+        if not self._is_senior_plus(member):
             await interaction.response.send_message(
-                "❌ You must be a Senior Supervisor to use `/clockadmin`.",
+                "❌ You must be a Senior Supervisor or higher to use `/clockadmin`.",
                 ephemeral=True,
             )
             return
@@ -558,6 +607,15 @@ class ShiftTracking(commands.Cog):
             )
             return
 
+        member = interaction.user
+        assert isinstance(member, discord.Member)
+        if not self._is_supervisor_plus(member):
+            await interaction.response.send_message(
+                "❌ You must be a Supervisor or higher to use `/clockboard`.",
+                ephemeral=True,
+            )
+            return
+
         supervisors: List[discord.Member] = []
         for m in guild.members:
             if m.bot:
@@ -566,6 +624,7 @@ class ShiftTracking(commands.Cog):
             if (
                 SUPERVISOR_ROLE_ID in role_ids
                 or SENIOR_SUPERVISOR_ROLE_ID in role_ids
+                or LEAD_SUPERVISOR_ROLE_ID in role_ids
             ):
                 supervisors.append(m)
 
@@ -607,7 +666,7 @@ class ShiftTracking(commands.Cog):
         name="clockadjust",
         description=(
             "Set a member's total clocked hours for this period "
-            "(Senior Supervisor+)."
+            "(Lead Supervisor+)."
         ),
     )
     @app_commands.describe(
@@ -631,10 +690,9 @@ class ShiftTracking(commands.Cog):
 
         actor = interaction.user
         assert isinstance(actor, discord.Member)
-        has_role = any(r.id == SENIOR_SUPERVISOR_ROLE_ID for r in actor.roles)
-        if not (has_role or actor.guild_permissions.administrator):
+        if not self._is_lead_plus(actor):
             await interaction.response.send_message(
-                "❌ You must be a Senior Supervisor to use `/clockadjust`.",
+                "❌ You must be a Lead Supervisor or higher to use `/clockadjust`.",
                 ephemeral=True,
             )
             return
@@ -679,10 +737,9 @@ class ShiftTracking(commands.Cog):
 
         actor = interaction.user
         assert isinstance(actor, discord.Member)
-        has_role = any(r.id == LEAD_SUPERVISOR_ROLE_ID for r in actor.roles)
-        if not (has_role or actor.guild_permissions.administrator):
+        if not self._is_lead_plus(actor):
             await interaction.response.send_message(
-                "❌ You must be a Lead Supervisor to use `/clockreset`.",
+                "❌ You must be a Lead Supervisor or higher to use `/clockreset`.",
                 ephemeral=True,
             )
             return
@@ -707,14 +764,9 @@ class ShiftTracking(commands.Cog):
         member = interaction.user
         assert isinstance(member, discord.Member)
 
-        # require Supervisor role (or higher) to use manage panel
-        role_ids = {r.id for r in member.roles}
-        if SUPERVISOR_ROLE_ID not in role_ids and not (
-            member.guild_permissions.administrator
-            or any(r.id == SENIOR_SUPERVISOR_ROLE_ID for r in member.roles)
-        ):
+        if not self._is_supervisor_plus(member):
             await interaction.response.send_message(
-                "❌ You must be a Supervisor to use `/clockmanage`.",
+                "❌ You must be a Supervisor or higher to use `/clockmanage`.",
                 ephemeral=True,
             )
             return
