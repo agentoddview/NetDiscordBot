@@ -73,7 +73,6 @@ INITIAL_EXTENSIONS = [
     "cogs.net_commands",
     "cogs.shift_tracking",
     "cogs.loa",
-    "cogs.modlog",
     "cogs.config",
     "cogs.moderation",
     "cogs.gpcheck",
@@ -234,5 +233,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("Shutting down")
+
 
 
