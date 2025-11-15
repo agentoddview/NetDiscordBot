@@ -140,66 +140,45 @@ class ShiftTracking(commands.Cog):
             return None
         return member
 
-    # ----------------------------------------------------------- presence hook
+      # ------------------------------------------------------------------ presence hook
 
     async def auto_end_for_presence_leave(self, discord_user_id: int) -> None:
-        """
-        Called from /roblox/presence when a user leaves or goes inactive.
+        """Called by the /roblox/presence webhook when a user leaves/inactive."""
 
-        If the user has an active shift *and* is Supervisor+ (has manage_messages),
-        we auto-end the shift and DM them.
-        """
         shift = ACTIVE_SHIFTS.get(discord_user_id)
-        if shift is None:
-            # Nothing to do – no active shift
+        if not shift:
+            # No active shift for this user, nothing to do
             log.debug(
                 "[presence] auto-end: user %s has no active shift",
                 discord_user_id,
             )
             return
 
-        guild = await self._get_guild()
-        if guild is None:
+        guild = self.bot.get_guild(self.bot.guild_id)
+        if not guild:
             log.warning(
-                "[presence] auto-end: cannot resolve guild for user %s",
-                discord_user_id,
+                "[presence] auto-end: guild %s not found",
+                self.bot.guild_id,
             )
             return
 
-        member = await self._fetch_member(guild, discord_user_id)
-        if member is None:
+        member = guild.get_member(discord_user_id)
+        if not member:
             log.warning(
-                "[presence] auto-end: member %s not found in guild %s",
+                "[presence] auto-end: member %s not found in guild",
                 discord_user_id,
-                guild.id,
-            )
-            return
-
-        # Only auto-end for Supervisor+ (using manage_messages perm as proxy)
-        if not any(r.permissions.manage_messages for r in member.roles):
-            log.info(
-                "[presence] auto-end: %s has a shift but is not Supervisor+, ignoring",
-                member.id,
             )
             return
 
         log.info(
-            "[presence] auto-end: ending shift for %s because they left the Roblox game",
+            "[presence] auto-end: ending shift for %s because they left/AFK'd in game",
             member.id,
         )
-        await self._end_shift(member, reason="Left Roblox game (presence webhook)")
 
-        # Try to DM them so they know what happened
-        try:
-            await member.send(
-                "⏰ Your staff clock has been automatically ended because you "
-                "left the Roblox game."
-            )
-        except discord.Forbidden:
-            log.info(
-                "[presence] auto-end: unable to DM %s (DMs disabled or blocked)",
-                member.id,
-            )
+        await self._end_shift(
+            member,
+            reason="Left or became inactive in the Roblox game (presence webhook)",
+        )
 
     # -------------------------------------------------------------- core logic
 
