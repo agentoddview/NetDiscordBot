@@ -13,6 +13,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from presence_state import is_in_game
+from database import get_connection
 
 log = logging.getLogger(__name__)
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
@@ -33,6 +34,109 @@ class ActiveShift:
 
 # key = discord user id, value = ActiveShift
 ACTIVE_SHIFTS: Dict[int, ActiveShift] = {}
+
+
+class ClockStatusView(discord.ui.View):
+    """Buttons for starting or ending a shift from /clock."""
+
+    def __init__(self, cog: "ShiftTracking", member: discord.Member, has_active_shift: bool) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.member_id = member.id
+        self.has_active_shift = has_active_shift
+
+        if has_active_shift:
+            end_button = discord.ui.Button(
+                label="End Shift",
+                style=discord.ButtonStyle.danger,
+            )
+            end_button.callback = self._end_shift_callback
+            self.add_item(end_button)
+        else:
+            start_button = discord.ui.Button(
+                label="Start Shift",
+                style=discord.ButtonStyle.success,
+            )
+            start_button.callback = self._start_shift_callback
+            self.add_item(start_button)
+
+    async def _ensure_same_user(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.member_id:
+            await interaction.response.send_message(
+                "You can't control someone else's shift from this panel.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def _start_shift_callback(self, interaction: discord.Interaction) -> None:
+        # Only the original user can use this
+        if not await self._ensure_same_user(interaction):
+            return
+
+        guild = await self.cog._ensure_guild(interaction)
+        member = guild.get_member(self.member_id)
+        if member is None:
+            await interaction.response.send_message(
+                "Could not resolve your member profile.",
+                ephemeral=True,
+            )
+            return
+
+        # Re-check that they don't already have an active shift
+        if member.id in ACTIVE_SHIFTS:
+            await interaction.response.send_message(
+                "You already have an active shift.",
+                ephemeral=True,
+            )
+            return
+
+        # Must be in the Roblox game
+        if not is_in_game(member.id):
+            await interaction.response.send_message(
+                "You must be in the Roblox game to start your staff shift.",
+                ephemeral=True,
+            )
+            return
+
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "Please use this in a text channel.",
+                ephemeral=True,
+            )
+            return
+
+        await self.cog._start_shift(member, channel, manual=True, interaction=interaction)
+
+    async def _end_shift_callback(self, interaction: discord.Interaction) -> None:
+        if not await self._ensure_same_user(interaction):
+            return
+
+        guild = await self.cog._ensure_guild(interaction)
+        member = guild.get_member(self.member_id)
+        if member is None:
+            await interaction.response.send_message(
+                "Could not resolve your member profile.",
+                ephemeral=True,
+            )
+            return
+
+        if member.id not in ACTIVE_SHIFTS:
+            await interaction.response.send_message(
+                "You don't have an active shift.",
+                ephemeral=True,
+            )
+            return
+
+        await self.cog._end_shift(
+            member,
+            reason="Ended via /clock panel",
+        )
+        await interaction.response.send_message(
+            "✅ Your shift has been ended.",
+            ephemeral=True,
+        )
 
 
 def utcnow() -> dt.datetime:
@@ -79,12 +183,13 @@ class ShiftTracking(commands.Cog):
             return
 
         guild_obj = discord.Object(id=GUILD_ID)
+        self.bot.tree.add_command(self.clock, guild=guild_obj)
         self.bot.tree.add_command(self.startclock, guild=guild_obj)
         self.bot.tree.add_command(self.endclock, guild=guild_obj)
         self.bot.tree.add_command(self.clockreset, guild=guild_obj)
 
         log.info(
-            "Registered shift commands (/startclock, /endclock, /clockreset) "
+            "Registered shift commands (/clock, /startclock, /endclock, /clockreset) "
             "for guild %s via ShiftTracking.cog_load",
             GUILD_ID,
         )
@@ -131,16 +236,12 @@ class ShiftTracking(commands.Cog):
         member = guild.get_member(user_id)
         if member is not None:
             return member
-
         try:
-            member = await guild.fetch_member(user_id)
-        except discord.NotFound:
-            return None
+            return await guild.fetch_member(user_id)
         except discord.HTTPException:
             return None
-        return member
 
-      # ------------------------------------------------------------------ presence hook
+    # ------------------------------------------------------------------ presence hook
 
     async def auto_end_for_presence_leave(self, discord_user_id: int) -> None:
         """Called by the /roblox/presence webhook when a user leaves/inactive."""
@@ -178,9 +279,52 @@ class ShiftTracking(commands.Cog):
         await self._end_shift(
             member,
             reason="Left or became inactive in the Roblox game (presence webhook)",
+            dm_user=True,
         )
 
     # -------------------------------------------------------------- core logic
+
+    async def _count_shift_moderations(
+        self,
+        guild_id: int,
+        moderator_id: int,
+        started_at: dt.datetime,
+        until: Optional[dt.datetime] = None,
+    ) -> int:
+        """
+        Return how many *unique players* this moderator has moderated
+        between started_at and until (inclusive).
+        """
+        if until is None:
+            until = utcnow()
+
+        # Use ISO8601 strings so lexical order matches chronological order.
+        start_iso = started_at.isoformat()
+        end_iso = until.isoformat()
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT COUNT(DISTINCT target_roblox_id)
+                    FROM moderations
+                    WHERE guild_id = ?
+                      AND moderator_id = ?
+                      AND created_at >= ?
+                      AND created_at <= ?
+                    """,
+                    (guild_id, moderator_id, start_iso, end_iso),
+                )
+                row = cur.fetchone()
+        except Exception:
+            # If for some reason the DB is unavailable, just treat as 0
+            logging.exception("Failed to count moderations for shift")
+            return 0
+
+        if row is None or row[0] is None:
+            return 0
+        return int(row[0])
 
     async def _start_shift(
         self,
@@ -215,7 +359,19 @@ class ShiftTracking(commands.Cog):
                 ephemeral=True,
             )
 
-    async def _end_shift(self, member: discord.Member, reason: str) -> None:
+    async def _end_shift(
+        self,
+        member: discord.Member,
+        reason: str,
+        *,
+        dm_user: bool = False,
+    ) -> None:
+        """
+        Core helper to end a shift, log it, and announce it.
+
+        If dm_user is True, the same "Shift Ended" embed will be sent as a DM
+        to the staff member (used for auto-end via presence).
+        """
         shift = ACTIVE_SHIFTS.pop(member.id, None)
         if not shift:
             return
@@ -223,22 +379,31 @@ class ShiftTracking(commands.Cog):
         ended_at = utcnow()
         delta = int((ended_at - shift.started_at).total_seconds())
 
+        # Build the embed once so we can reuse it in the channel and DMs.
+        embed = discord.Embed(
+            title="Shift Ended",
+            description=(
+                f"**Staff:** {member.mention}\n"
+                f"**Started:** {fmt_dt(shift.started_at)}\n"
+                f"**Ended:** {fmt_dt(ended_at)}\n"
+                f"**Duration:** {fmt_duration(delta)}\n"
+                f"**Reason:** {reason}"
+            ),
+            colour=discord.Colour.blurple(),
+            timestamp=ended_at,
+        )
+
         guild = member.guild
         channel = guild.get_channel(shift.channel_id)
         if isinstance(channel, discord.TextChannel):
-            embed = discord.Embed(
-                title="Shift Ended",
-                description=(
-                    f"**Staff:** {member.mention}\n"
-                    f"**Started:** {fmt_dt(shift.started_at)}\n"
-                    f"**Ended:** {fmt_dt(ended_at)}\n"
-                    f"**Duration:** {fmt_duration(delta)}\n"
-                    f"**Reason:** {reason}"
-                ),
-                colour=discord.Colour.blurple(),
-                timestamp=ended_at,
-            )
             await channel.send(embed=embed)
+
+        if dm_user:
+            try:
+                await member.send(embed=embed)
+            except discord.HTTPException:
+                # Can't DM them (DMs closed, blocked, etc.) – not fatal.
+                log.info("Failed to DM shift-ended embed to %s", member.id)
 
         log.info(
             "Shift ended: user=%s duration=%ss reason=%s",
@@ -248,6 +413,69 @@ class ShiftTracking(commands.Cog):
         )
 
     # -------------------------------------------------------------- slash cmds
+
+    @app_commands.command(
+        name="clock",
+        description="Check your current shift and moderation stats.",
+    )
+    async def clock(self, interaction: discord.Interaction) -> None:
+        """Show how long you've been on shift + how many people you've moderated."""
+        guild = await self._ensure_guild(interaction)
+
+        # Resolve the member object for the user invoking the command.
+        if isinstance(interaction.user, discord.Member):
+            member: Optional[discord.Member] = interaction.user
+        else:
+            member = guild.get_member(interaction.user.id)
+
+        if member is None:
+            await interaction.response.send_message(
+                "Could not resolve your member profile in this guild.",
+                ephemeral=True,
+            )
+            return
+
+        now = utcnow()
+        shift = ACTIVE_SHIFTS.get(member.id)
+
+        if shift:
+            duration_seconds = int((now - shift.started_at).total_seconds())
+            moderated_count = await self._count_shift_moderations(
+                guild.id,
+                member.id,
+                shift.started_at,
+                now,
+            )
+            embed = discord.Embed(
+                title="Current Shift Status",
+                description=(
+                    f"**Staff:** {member.mention}\n"
+                    f"**Started:** {fmt_dt(shift.started_at)}\n"
+                    f"**Duration:** {fmt_duration(duration_seconds)}\n"
+                    f"**Players moderated this shift:** {moderated_count}"
+                ),
+                colour=discord.Colour.blurple(),
+                timestamp=now,
+            )
+            has_active_shift = True
+        else:
+            embed = discord.Embed(
+                title="No Active Shift",
+                description=(
+                    "You are not currently on a staff shift.\n"
+                    "Use the button below to start your shift while you are in-game."
+                ),
+                colour=discord.Colour.blurple(),
+                timestamp=now,
+            )
+            has_active_shift = False
+
+        view = ClockStatusView(self, member, has_active_shift=has_active_shift)
+        await interaction.response.send_message(
+            embed=embed,
+            view=view,
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="startclock",
@@ -294,10 +522,9 @@ class ShiftTracking(commands.Cog):
     )
     async def endclock(self, interaction: discord.Interaction) -> None:
         guild = await self._ensure_guild(interaction)
-        member: Optional[discord.Member]
 
         if isinstance(interaction.user, discord.Member):
-            member = interaction.user
+            member: Optional[discord.Member] = interaction.user
         else:
             member = guild.get_member(interaction.user.id)
 
@@ -318,11 +545,9 @@ class ShiftTracking(commands.Cog):
             "✅ Your shift has been ended.", ephemeral=True
         )
 
-    # --------------------------------------------------------- admin command
-
     @app_commands.command(
         name="clockreset",
-        description="(Lead+) Force end a user's shift.",
+        description="Force-end another user's clock (staff only).",
     )
     @app_commands.checks.has_permissions(manage_messages=True)
     async def clockreset(
