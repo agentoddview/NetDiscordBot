@@ -20,7 +20,39 @@ BLOXLINK_BASE_URL = os.getenv(
 )
 
 # ---------------------------------------------------------------------------
-# CONFIG – replace these IDs with your real gamepass IDs
+# ROLE CONFIG – Supervisor+
+# ---------------------------------------------------------------------------
+
+SUPERVISOR_ROLE_ID = 947288094804176957
+SENIOR_SUPERVISOR_ROLE_ID = 1393088300239159467
+LEAD_SUPERVISOR_ROLE_ID = 1351333124965142600
+
+SUPERVISOR_PLUS_ROLES = {
+    SUPERVISOR_ROLE_ID,
+    SENIOR_SUPERVISOR_ROLE_ID,
+    LEAD_SUPERVISOR_ROLE_ID,
+}
+
+
+def is_supervisor_plus():
+    """App command check that ensures the user has Supervisor+."""
+
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if not isinstance(interaction.user, discord.Member):
+            # DMs / weird edge cases
+            raise app_commands.CheckFailure("You must be Supervisor+ to use this command.")
+
+        member: discord.Member = interaction.user
+        if any(role.id in SUPERVISOR_PLUS_ROLES for role in member.roles):
+            return True
+
+        raise app_commands.CheckFailure("You must be Supervisor+ to use this command.")
+
+    return app_commands.check(predicate)
+
+
+# ---------------------------------------------------------------------------
+# GAMEPASS CONFIG – replace these IDs with your real gamepass IDs
 # ---------------------------------------------------------------------------
 
 # Boston Bus Simulator gamepasses we care about
@@ -52,7 +84,6 @@ class GamepassCheck(commands.Cog):
             return
 
         guild_obj = discord.Object(id=GUILD_ID)
-        # explicitly register the command to this guild
         self.bot.tree.add_command(self.gpcheck, guild=guild_obj)
         log.info(
             "Registered /gpcheck for guild %s via GamepassCheck.cog_load",
@@ -60,7 +91,6 @@ class GamepassCheck(commands.Cog):
         )
 
     async def cog_unload(self) -> None:
-        # Nothing special to clean up
         pass
 
     # ---------------------------------------------------------- helpers
@@ -197,6 +227,7 @@ class GamepassCheck(commands.Cog):
 
     # ---------------------------------------------------------- slash command
 
+    @is_supervisor_plus()
     @app_commands.command(
         name="gpcheck",
         description="Check configured gamepasses for a user's linked Roblox account.",
@@ -213,6 +244,8 @@ class GamepassCheck(commands.Cog):
         - Looks up their Roblox ID via Bloxlink
         - Checks ownership of each configured BBS gamepass
         - Responds with an embed showing ✅ / ❌ / ⚠️ for each pass
+
+        Visible to everyone in the channel (non-ephemeral).
         """
         if interaction.guild is None or interaction.guild.id != GUILD_ID:
             await interaction.response.send_message(
@@ -221,7 +254,8 @@ class GamepassCheck(commands.Cog):
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # Non-ephemeral so everyone in the ticket/channel can see it
+        await interaction.response.defer(ephemeral=False)
 
         # Step 1 – Discord -> Roblox via Bloxlink
         roblox_id = await self._get_roblox_id_from_bloxlink(user.id)
@@ -229,7 +263,7 @@ class GamepassCheck(commands.Cog):
             await interaction.followup.send(
                 f"❌ Could not find a linked Roblox account for {user.mention} "
                 "via Bloxlink. Ask them to verify with Bloxlink first.",
-                ephemeral=True,
+                ephemeral=False,
             )
             return
 
@@ -265,8 +299,10 @@ class GamepassCheck(commands.Cog):
             colour=discord.Colour.blurple(),
         )
 
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        # Non-ephemeral: visible to everyone
+        await interaction.followup.send(embed=embed, ephemeral=False)
 
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(GamepassCheck(bot))
+
