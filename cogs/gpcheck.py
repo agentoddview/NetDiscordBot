@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 
 import aiohttp
 import discord
@@ -18,6 +18,10 @@ BLOXLINK_BASE_URL = os.getenv(
     "BLOXLINK_BASE_URL",
     "https://api.blox.link/v4/public",
 )
+
+INVENTORY_BASE_URL = "https://inventory.roblox.com/v1"
+ROBLOX_USERS_API = "https://users.roblox.com/v1"
+ROBLOX_THUMBNAILS_API = "https://thumbnails.roblox.com/v1"
 
 # ---------------------------------------------------------------------------
 # ROLE CONFIG – Supervisor+
@@ -39,7 +43,6 @@ def is_supervisor_plus():
 
     async def predicate(interaction: discord.Interaction) -> bool:
         if not isinstance(interaction.user, discord.Member):
-            # DMs / weird edge cases
             raise app_commands.CheckFailure("You must be Supervisor+ to use this command.")
 
         member: discord.Member = interaction.user
@@ -52,20 +55,23 @@ def is_supervisor_plus():
 
 
 # ---------------------------------------------------------------------------
-# GAMEPASS CONFIG – replace these IDs with your real gamepass IDs
+# GAMEPASS CONFIG – fill these with your real IDs
 # ---------------------------------------------------------------------------
 
-# Boston Bus Simulator gamepasses we care about
+# Boston Bus Simulator gamepasses
 BBS_GAMEPASSES: Dict[int, str] = {
-    1288712364: "Beta Teser Pack",        # TODO: replace with real ID + name
+    1288712364: "Beta Teser Pack",
     1141373961: "Freedrive Access",
     1299347939: "2x Cash",
     1141341910: "Transit Police",
     1141911395: "Low Floor Access",
 }
 
-INVENTORY_BASE_URL = "https://inventory.roblox.com/v1"
-
+# Other game (e.g. under your boss’s account / group)
+OTHER_GAMEPASSES: Dict[int, str] = {
+    10454022: "WRTA Unlock All",
+    1021966268: "WRTA TPD",
+}
 
 class GamepassCheck(commands.Cog):
     """Slash command /gpcheck that verifies ownership of configured gamepasses."""
@@ -126,8 +132,6 @@ class GamepassCheck(commands.Cog):
                             )
                             return None
 
-                        # Example body from docs:
-                        # { "robloxID": "146941966", "resolved": { ... } }
                         roblox_id_str = data.get("robloxID")
                         if not roblox_id_str:
                             log.warning(
@@ -148,7 +152,6 @@ class GamepassCheck(commands.Cog):
                             return None
 
                     if resp.status == 404:
-                        # User just isn't linked.
                         log.info(
                             "[bloxlink] discord_id %s has no linked roblox (404). body=%s",
                             discord_id,
@@ -225,6 +228,87 @@ class GamepassCheck(commands.Cog):
                 )
                 return None
 
+    async def _get_roblox_profile(
+        self,
+        roblox_user_id: int,
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        Fetch (username, display_name, avatar_url) for a Roblox user.
+        avatar_url may be None if the thumbnail API fails.
+        """
+        username: Optional[str] = None
+        display_name: Optional[str] = None
+        avatar_url: Optional[str] = None
+
+        async with aiohttp.ClientSession() as session:
+            # 1) Get username / display name
+            user_url = f"{ROBLOX_USERS_API}/users/{roblox_user_id}"
+            try:
+                async with session.get(user_url, timeout=10) as resp:
+                    text = await resp.text()
+                    if resp.status == 200:
+                        try:
+                            data = await resp.json()
+                        except aiohttp.ContentTypeError:
+                            log.warning(
+                                "[roblox users] non-JSON 200 for user %s: %s",
+                                roblox_user_id,
+                                text,
+                            )
+                        else:
+                            username = data.get("name")
+                            display_name = data.get("displayName") or username
+                    else:
+                        log.warning(
+                            "[roblox users] error %s for user %s: %s",
+                            resp.status,
+                            roblox_user_id,
+                            text,
+                        )
+            except aiohttp.ClientError as e:
+                log.warning(
+                    "[roblox users] network error for user %s: %s",
+                    roblox_user_id,
+                    e,
+                )
+
+            # 2) Get avatar thumbnail
+            thumb_url = (
+                f"{ROBLOX_THUMBNAILS_API}/users/avatar-headshot"
+                f"?userIds={roblox_user_id}&size=150x150&format=Png&isCircular=false"
+            )
+            try:
+                async with session.get(thumb_url, timeout=10) as resp:
+                    text = await resp.text()
+                    if resp.status == 200:
+                        try:
+                            data = await resp.json()
+                        except aiohttp.ContentTypeError:
+                            log.warning(
+                                "[roblox thumbs] non-JSON 200 for user %s: %s",
+                                roblox_user_id,
+                                text,
+                            )
+                        else:
+                            items = data.get("data") or []
+                            if items:
+                                avatar_url = items[0].get("imageUrl")
+                    else:
+                        log.warning(
+                            "[roblox thumbs] error %s for user %s: %s",
+                            resp.status,
+                            roblox_user_id,
+                            text,
+                        )
+            except aiohttp.ClientError as e:
+                log.warning(
+                    "[roblox thumbs] network error for user %s: %s",
+                    roblox_user_id,
+                    e,
+                )
+
+        return username, display_name, avatar_url
+
     # ---------------------------------------------------------- slash command
 
     @is_supervisor_plus()
@@ -242,10 +326,9 @@ class GamepassCheck(commands.Cog):
         """
         Usage: /gpcheck @User
         - Looks up their Roblox ID via Bloxlink
-        - Checks ownership of each configured BBS gamepass
-        - Responds with an embed showing ✅ / ❌ / ⚠️ for each pass
-
-        Visible to everyone in the channel (non-ephemeral).
+        - Pulls their Roblox username, profile link, and avatar icon
+        - Checks ownership of configured BBS + other gamepasses
+        - Posts a visible embed in the channel
         """
         if interaction.guild is None or interaction.guild.id != GUILD_ID:
             await interaction.response.send_message(
@@ -267,8 +350,14 @@ class GamepassCheck(commands.Cog):
             )
             return
 
-        # Step 2 – check each configured gamepass
-        lines = []
+        # Step 2 – Get Roblox profile info
+        username, display_name, avatar_url = await self._get_roblox_profile(roblox_id)
+        profile_url = f"https://www.roblox.com/users/{roblox_id}/profile"
+
+        # Step 3 – check each configured gamepass
+        bbs_lines = []
+        other_lines = []
+
         for gp_id, gp_name in BBS_GAMEPASSES.items():
             owned = await self._user_owns_gamepass(roblox_id, gp_id)
             if owned is True:
@@ -281,17 +370,50 @@ class GamepassCheck(commands.Cog):
                 emoji = "⚠️"
                 status = "Unknown (API error)"
 
-            lines.append(f"{emoji} **{gp_name}** (`{gp_id}`) — {status}")
+            bbs_lines.append(f"{emoji} **{gp_name}** (`{gp_id}`) — {status}")
 
-        if not lines:
-            lines.append("_No gamepasses configured in the bot yet._")
+        for gp_id, gp_name in OTHER_GAMEPASSES.items():
+            owned = await self._user_owns_gamepass(roblox_id, gp_id)
+            if owned is True:
+                emoji = "✅"
+                status = "Owned"
+            elif owned is False:
+                emoji = "❌"
+                status = "Not owned"
+            else:
+                emoji = "⚠️"
+                status = "Unknown (API error)"
 
-        description = (
+            other_lines.append(f"{emoji} **{gp_name}** (`{gp_id}`) — {status}")
+
+        # Step 4 – Build embed
+        if display_name or username:
+            name_line = display_name or username
+            profile_line = f"[{name_line}]({profile_url})"
+        else:
+            profile_line = profile_url
+
+        header = (
             f"Checking configured gamepasses for {user.mention}.\n"
-            f"**Roblox user ID:** `{roblox_id}`\n\n"
-            "**Boston Bus Simulator gamepasses:**\n"
-            + "\n".join(lines)
+            f"**Roblox user ID:** `{roblox_id}`\n"
+            f"**Roblox profile:** {profile_line}\n\n"
         )
+
+        body_parts = []
+
+        if bbs_lines:
+            body_parts.append("**Boston Bus Simulator gamepasses:**")
+            body_parts.append("\n".join(bbs_lines))
+
+        if other_lines:
+            body_parts.append("")
+            body_parts.append("**Other gamepasses:**")
+            body_parts.append("\n".join(other_lines))
+
+        if not bbs_lines and not other_lines:
+            body_parts.append("_No gamepasses configured in the bot yet._")
+
+        description = header + "\n".join(body_parts)
 
         embed = discord.Embed(
             title="Gamepass Check",
@@ -299,10 +421,11 @@ class GamepassCheck(commands.Cog):
             colour=discord.Colour.blurple(),
         )
 
-        # Non-ephemeral: visible to everyone
+        if avatar_url:
+            embed.set_thumbnail(url=avatar_url)
+
         await interaction.followup.send(embed=embed, ephemeral=False)
 
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(GamepassCheck(bot))
-
