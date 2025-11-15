@@ -70,6 +70,27 @@ class ShiftTracking(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
+class ShiftTracking(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    async def cog_load(self) -> None:
+        """Ensure slash commands are registered for the guild."""
+        if not GUILD_ID:
+            log.warning("GUILD_ID is not set; shift commands will not be registered.")
+            return
+
+        guild_obj = discord.Object(id=GUILD_ID)
+
+        # These are the @app_commands.command methods defined below
+        self.bot.tree.add_command(self.startclock, guild=guild_obj)
+        self.bot.tree.add_command(self.endclock, guild=guild_obj)
+
+        log.info(
+            "Registered /startclock and /endclock for guild %s via ShiftTracking.cog_load",
+            GUILD_ID,
+        )
+
     # ------------------------------------------------------------------ utils
 
     async def _ensure_guild(self, interaction: discord.Interaction) -> discord.Guild:
