@@ -76,6 +76,7 @@ INITIAL_EXTENSIONS = [
     "cogs.modlog",
     "cogs.config",
     "cogs.moderation",
+    "cogs.gpcheck",
 ]
 
 
@@ -233,4 +234,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("Shutting down")
+
 
