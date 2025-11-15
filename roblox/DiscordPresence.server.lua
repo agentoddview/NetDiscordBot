@@ -20,10 +20,10 @@ end
 local PRESENCE_ENDPOINT = "http://71.212.82.1.sslip.io:3000/roblox/presence"
 
 -- MUST match ROBLOX_GAME_SECRET in your Discord bot .env
-local GAME_SECRET = "PUTHERE"
+local GAME_SECRET = "REPLACEHERE"
 
 -- AFK timeout in seconds (10 minutes)
-local INACTIVITY_SECONDS = 10 * 60
+local INACTIVITY_SECONDS = 5 * 60
 
 -- Only track staff in this group / rank
 local STAFF_GROUP_ID = 13039250
