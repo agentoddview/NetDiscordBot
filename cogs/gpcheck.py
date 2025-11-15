@@ -32,14 +32,6 @@ BBS_GAMEPASSES: Dict[int, str] = {
     1141911395: "Low Floor Access",
 }
 
-# If you want to support other games later, add more dicts like this and
-# update the embed-building logic to show them.
-# OTHER_GAMEPASSES: Dict[int, str] = { ... }
-
-# Roblox inventory endpoint that works for checking ownership of a given asset.
-# We'll use the legacy v1 inventory API:
-#   https://inventory.roblox.com/v1/users/{userId}/items/GamePass/{gamePassId}
-# Data array is non-empty if the user owns that gamepass. :contentReference[oaicite:0]{index=0}
 INVENTORY_BASE_URL = "https://inventory.roblox.com/v1"
 
 
@@ -48,6 +40,28 @@ class GamepassCheck(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+
+    # ---------------------------------------------------------- cog lifecycle
+
+    async def cog_load(self) -> None:
+        """Register /gpcheck as a guild command, like the shift commands."""
+        if not GUILD_ID:
+            log.warning(
+                "GUILD_ID is not set; /gpcheck will not be registered."
+            )
+            return
+
+        guild_obj = discord.Object(id=GUILD_ID)
+        # explicitly register the command to this guild
+        self.bot.tree.add_command(self.gpcheck, guild=guild_obj)
+        log.info(
+            "Registered /gpcheck for guild %s via GamepassCheck.cog_load",
+            GUILD_ID,
+        )
+
+    async def cog_unload(self) -> None:
+        # Nothing special to clean up
+        pass
 
     # ---------------------------------------------------------- helpers
 
@@ -159,12 +173,10 @@ class GamepassCheck(commands.Cog):
                             )
                             return None
 
-                        # For this endpoint, "data" is a list. If it's empty,
-                        # the user doesn't own the gamepass. :contentReference[oaicite:1]{index=1}
+                        # v1/items endpoint: "data" is a list; non-empty means owned.
                         owned = bool(data.get("data"))
                         return owned
 
-                    # 4xx/5xx – just log and return None so we can show "Unknown"
                     log.warning(
                         "[roblox inventory] error %s for user %s gp %s: %s",
                         resp.status,
@@ -190,6 +202,7 @@ class GamepassCheck(commands.Cog):
         description="Check configured gamepasses for a user's linked Roblox account.",
     )
     @app_commands.describe(user="Discord user to check")
+    @app_commands.guild_only()
     async def gpcheck(
         self,
         interaction: discord.Interaction,
@@ -201,7 +214,6 @@ class GamepassCheck(commands.Cog):
         - Checks ownership of each configured BBS gamepass
         - Responds with an embed showing ✅ / ❌ / ⚠️ for each pass
         """
-        # Make sure we're in the configured guild
         if interaction.guild is None or interaction.guild.id != GUILD_ID:
             await interaction.response.send_message(
                 "This command is not configured for this server.",
@@ -254,18 +266,6 @@ class GamepassCheck(commands.Cog):
         )
 
         await interaction.followup.send(embed=embed, ephemeral=True)
-
-    # ---------------------------------------------------------- cog lifecycle
-
-    async def cog_load(self) -> None:
-        if not GUILD_ID:
-            log.warning(
-                "GUILD_ID is not set; /gpcheck will not be registered."
-            )
-
-    # No extra teardown needed
-    async def cog_unload(self) -> None:
-        pass
 
 
 async def setup(bot: commands.Bot) -> None:
