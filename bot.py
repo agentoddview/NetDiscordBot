@@ -157,24 +157,24 @@ routes = web.RouteTableDef()
 
 
 @routes.post("/roblox/presence")
-async def handle_roblox_presence(request: web.Request) -> web.StreamResponse:
-    # Secret check
-    secret = request.headers.get("X-Game-Secret")
-    if secret != ROBLOX_GAME_SECRET:
-        log.info("[web] bad secret from %s", request.remote)
-        return web.json_response({"error": "bad secret"}, status=403)
+# --- Roblox presence webhook -------------------------------------------------
 
+async def handle_roblox_presence(request: web.Request) -> web.Response:
+    """Webhook from Roblox telling us join/leave/inactive for a roblox_id."""
     try:
         data = await request.json()
     except Exception:
-        log.warning("[web] invalid JSON from %s", request.remote)
+        log.warning("[roblox] bad JSON payload from %s", request.remote)
         return web.json_response({"error": "invalid json"}, status=400)
+
+    # Shared secret
+    secret = request.headers.get("X-Game-Secret")
+    if secret != ROBLOX_GAME_SECRET:
+        log.warning("[roblox] bad secret from %s", request.remote)
+        return web.json_response({"error": "bad secret"}, status=403)
 
     roblox_id = str(data.get("roblox_id") or "")
     event = data.get("event")
-
-    if not roblox_id or not event:
-        return web.json_response({"error": "missing roblox_id or event"}, status=400)
 
     log.info(
         "[roblox] incoming presence request roblox_id=%s event=%s",
@@ -182,30 +182,34 @@ async def handle_roblox_presence(request: web.Request) -> web.StreamResponse:
         event,
     )
 
+    if not roblox_id or event not in {"join", "leave", "inactive"}:
+        return web.json_response({"error": "invalid payload"}, status=400)
+
+    # Look up linked Discord ID via Bloxlink
     discord_id = await get_discord_id_from_bloxlink(roblox_id)
-
     if discord_id is None:
-        # No linked account → 404 for the game, so it can show "no linked discord".
-        return web.json_response(
-            {"error": "no linked discord account"},
-            status=404,
-        )
+        # Player doesn't have a linked Discord account
+        return web.json_response({"error": "no linked discord account"}, status=404)
 
-    # Record join / leave in our in-memory presence_state
+    # Keep our in-memory "who is in game" map up to date
     if event == "join":
         mark_join(discord_id)
-    elif event == "leave":
+    else:
+        # treat leave + inactive the same for presence
         mark_leave(discord_id)
-        # Try to auto-end their shift
+
+        # Try auto-ending any active shift for this user
         cog = bot.get_cog("ShiftTracking")
         if cog is not None:
-            await cog.auto_end_for_presence_leave(discord_id)
-    elif event == "inactive":
-        # Optional: could mark AFK separately later
-        pass
+            try:
+                await cog.auto_end_for_presence_leave(int(discord_id))
+            except Exception:
+                log.exception(
+                    "[presence] auto_end_for_presence_leave failed for %s",
+                    discord_id,
+                )
 
-    return web.json_response({"ok": True}, status=200)
-
+    return web.json_response({"status": "ok"})
 
 app = web.Application()
 app.add_routes(routes)
@@ -229,3 +233,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("Shutting down")
+
