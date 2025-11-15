@@ -11,18 +11,18 @@ from discord.ext import commands
 
 from presence_state import mark_join, mark_leave
 
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 # Logging
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(levelname)s:%(name)s:%(message)s",
 )
 log = logging.getLogger("netbot")
 
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 # Config / env
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID_STR = os.getenv("GUILD_ID")
 WEB_PORT_STR = os.getenv("WEB_PORT", "3000")
@@ -58,18 +58,49 @@ except ValueError:
 
 log.info("Starting bot for guild %s on web port %s", GUILD_ID, WEB_PORT)
 
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 # Discord bot setup
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 intents = discord.Intents.default()
 intents.members = True
 intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+bot.guild_id = GUILD_ID  # used by ShiftTracking
 
-# -----------------------------------------------------------------------------
+
+INITIAL_EXTENSIONS = [
+    "cogs.net_commands",
+    "cogs.shift_tracking",
+    "cogs.loa",
+    "cogs.modlog",
+    "cogs.config",
+    "cogs.moderation",
+]
+
+
+@bot.event
+async def setup_hook():
+    """Load cogs and sync slash commands to the guild."""
+    for ext in INITIAL_EXTENSIONS:
+        try:
+            await bot.load_extension(ext)
+            log.info("Loaded extension %s", ext)
+        except Exception as exc:
+            log.exception("Failed to load extension %s: %s", ext, exc)
+
+    guild_obj = discord.Object(id=GUILD_ID)
+    await bot.tree.sync(guild=guild_obj)
+    log.info("Synced application commands to guild %s", GUILD_ID)
+
+
+@bot.event
+async def on_ready():
+    log.info("Logged in as %s (%s)", bot.user, bot.user.id)
+
+# -------------------------------------------------------------------------
 # Bloxlink helper
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 async def get_discord_id_from_bloxlink(roblox_id: str) -> Optional[int]:
     """Look up the Discord ID for this roblox_id via Bloxlink."""
     url = f"{BLOXLINK_BASE_URL}/guilds/{GUILD_ID}/roblox-to-discord/{roblox_id}"
@@ -119,10 +150,11 @@ async def get_discord_id_from_bloxlink(roblox_id: str) -> Optional[int]:
             log.warning("[bloxlink] network error looking up %s: %s", roblox_id, e)
             return None
 
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 # Aiohttp web server
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 routes = web.RouteTableDef()
+
 
 @routes.post("/roblox/presence")
 async def handle_roblox_presence(request: web.Request) -> web.StreamResponse:
@@ -164,18 +196,23 @@ async def handle_roblox_presence(request: web.Request) -> web.StreamResponse:
         mark_join(discord_id)
     elif event == "leave":
         mark_leave(discord_id)
+        # Try to auto-end their shift
+        cog = bot.get_cog("ShiftTracking")
+        if cog is not None:
+            await cog.auto_end_for_presence_leave(discord_id)
     elif event == "inactive":
         # Optional: could mark AFK separately later
         pass
 
     return web.json_response({"ok": True}, status=200)
 
+
 app = web.Application()
 app.add_routes(routes)
 
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 # Main entrypoint: run Discord bot and web server together
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 async def main():
     runner = web.AppRunner(app)
     await runner.setup()
@@ -185,6 +222,7 @@ async def main():
 
     async with bot:
         await bot.start(DISCORD_TOKEN)
+
 
 if __name__ == "__main__":
     try:
