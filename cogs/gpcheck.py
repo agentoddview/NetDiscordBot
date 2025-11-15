@@ -73,31 +73,38 @@ OTHER_GAMEPASSES: Dict[int, str] = {
     1021966268: "WRTA TPD",
 }
 
+
 class GamepassCheck(commands.Cog):
     """Slash command /gpcheck that verifies ownership of configured gamepasses."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self.session: aiohttp.ClientSession | None = None
 
     # ---------------------------------------------------------- cog lifecycle
 
     async def cog_load(self) -> None:
-        """Register /gpcheck as a guild command, like the shift commands."""
+        """Register /gpcheck as a guild command, like the shift commands, and create HTTP session."""
         if not GUILD_ID:
             log.warning(
                 "GUILD_ID is not set; /gpcheck will not be registered."
             )
-            return
+        else:
+            guild_obj = discord.Object(id=GUILD_ID)
+            self.bot.tree.add_command(self.gpcheck, guild=guild_obj)
+            log.info(
+                "Registered /gpcheck for guild %s via GamepassCheck.cog_load",
+                GUILD_ID,
+            )
 
-        guild_obj = discord.Object(id=GUILD_ID)
-        self.bot.tree.add_command(self.gpcheck, guild=guild_obj)
-        log.info(
-            "Registered /gpcheck for guild %s via GamepassCheck.cog_load",
-            GUILD_ID,
-        )
+        # Create a shared aiohttp session for this cog
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession()
 
     async def cog_unload(self) -> None:
-        pass
+        # Close shared HTTP session on unload
+        if self.session and not self.session.closed:
+            await self.session.close()
 
     # ---------------------------------------------------------- helpers
 
@@ -110,70 +117,74 @@ class GamepassCheck(commands.Cog):
             log.warning("GUILD_ID is not set; /gpcheck will not work.")
             return None
 
+        session = self.session
+        if session is None or session.closed:
+            log.warning("[bloxlink] HTTP session is not available.")
+            return None
+
         url = (
             f"{BLOXLINK_BASE_URL}/guilds/{GUILD_ID}"
             f"/discord-to-roblox/{discord_id}"
         )
         headers = {"Authorization": BLOXLINK_API_KEY}
 
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(url, headers=headers, timeout=10) as resp:
-                    text = await resp.text()
+        try:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                text = await resp.text()
 
-                    if resp.status == 200:
-                        try:
-                            data = await resp.json()
-                        except aiohttp.ContentTypeError:
-                            log.warning(
-                                "[bloxlink] non-JSON 200 response for %s: %s",
-                                discord_id,
-                                text,
-                            )
-                            return None
-
-                        roblox_id_str = data.get("robloxID")
-                        if not roblox_id_str:
-                            log.warning(
-                                "[bloxlink] 200 but no robloxID in body for %s: %s",
-                                discord_id,
-                                data,
-                            )
-                            return None
-
-                        try:
-                            return int(roblox_id_str)
-                        except (TypeError, ValueError):
-                            log.warning(
-                                "[bloxlink] robloxID not an int for %s: %r",
-                                discord_id,
-                                roblox_id_str,
-                            )
-                            return None
-
-                    if resp.status == 404:
-                        log.info(
-                            "[bloxlink] discord_id %s has no linked roblox (404). body=%s",
+                if resp.status == 200:
+                    try:
+                        data = await resp.json()
+                    except aiohttp.ContentTypeError:
+                        log.warning(
+                            "[bloxlink] non-JSON 200 response for %s: %s",
                             discord_id,
                             text,
                         )
                         return None
 
-                    log.warning(
-                        "[bloxlink] error %s looking up discord_id %s: %s",
-                        resp.status,
+                    roblox_id_str = data.get("robloxID")
+                    if not roblox_id_str:
+                        log.warning(
+                            "[bloxlink] 200 but no robloxID in body for %s: %s",
+                            discord_id,
+                            data,
+                        )
+                        return None
+
+                    try:
+                        return int(roblox_id_str)
+                    except (TypeError, ValueError):
+                        log.warning(
+                            "[bloxlink] robloxID not an int for %s: %r",
+                            discord_id,
+                            roblox_id_str,
+                        )
+                        return None
+
+                if resp.status == 404:
+                    log.info(
+                        "[bloxlink] discord_id %s has no linked roblox (404). body=%s",
                         discord_id,
                         text,
                     )
                     return None
 
-            except aiohttp.ClientError as e:
                 log.warning(
-                    "[bloxlink] network error looking up discord_id %s: %s",
+                    "[bloxlink] error %s looking up discord_id %s: %s",
+                    resp.status,
                     discord_id,
-                    e,
+                    text,
                 )
                 return None
+
+        except aiohttp.ClientError as e:
+            log.warning(
+                "[bloxlink] network error looking up discord_id %s: %s",
+                discord_id,
+                e,
+            )
+            return None
 
     async def _user_owns_gamepass(
         self,
@@ -184,49 +195,53 @@ class GamepassCheck(commands.Cog):
         Return True/False if we can tell whether the user owns the gamepass,
         or None if the API call failed.
         """
+        session = self.session
+        if session is None or session.closed:
+            log.warning("[roblox inventory] HTTP session is not available.")
+            return None
+
         url = (
             f"{INVENTORY_BASE_URL}/users/{roblox_user_id}"
             f"/items/GamePass/{gamepass_id}"
         )
 
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(url, timeout=10) as resp:
-                    text = await resp.text()
+        try:
+            async with session.get(url, timeout=10) as resp:
+                text = await resp.text()
 
-                    if resp.status == 200:
-                        try:
-                            data = await resp.json()
-                        except aiohttp.ContentTypeError:
-                            log.warning(
-                                "[roblox inventory] non-JSON 200 response for user %s, gp %s: %s",
-                                roblox_user_id,
-                                gamepass_id,
-                                text,
-                            )
-                            return None
+                if resp.status == 200:
+                    try:
+                        data = await resp.json()
+                    except aiohttp.ContentTypeError:
+                        log.warning(
+                            "[roblox inventory] non-JSON 200 response for user %s, gp %s: %s",
+                            roblox_user_id,
+                            gamepass_id,
+                            text,
+                        )
+                        return None
 
-                        # v1/items endpoint: "data" is a list; non-empty means owned.
-                        owned = bool(data.get("data"))
-                        return owned
+                    # v1/items endpoint: "data" is a list; non-empty means owned.
+                    owned = bool(data.get("data"))
+                    return owned
 
-                    log.warning(
-                        "[roblox inventory] error %s for user %s gp %s: %s",
-                        resp.status,
-                        roblox_user_id,
-                        gamepass_id,
-                        text,
-                    )
-                    return None
-
-            except aiohttp.ClientError as e:
                 log.warning(
-                    "[roblox inventory] network error for user %s gp %s: %s",
+                    "[roblox inventory] error %s for user %s gp %s: %s",
+                    resp.status,
                     roblox_user_id,
                     gamepass_id,
-                    e,
+                    text,
                 )
                 return None
+
+        except aiohttp.ClientError as e:
+            log.warning(
+                "[roblox inventory] network error for user %s gp %s: %s",
+                roblox_user_id,
+                gamepass_id,
+                e,
+            )
+            return None
 
     async def _get_roblox_profile(
         self,
@@ -240,72 +255,76 @@ class GamepassCheck(commands.Cog):
         display_name: Optional[str] = None
         avatar_url: Optional[str] = None
 
-        async with aiohttp.ClientSession() as session:
-            # 1) Get username / display name
-            user_url = f"{ROBLOX_USERS_API}/users/{roblox_user_id}"
-            try:
-                async with session.get(user_url, timeout=10) as resp:
-                    text = await resp.text()
-                    if resp.status == 200:
-                        try:
-                            data = await resp.json()
-                        except aiohttp.ContentTypeError:
-                            log.warning(
-                                "[roblox users] non-JSON 200 for user %s: %s",
-                                roblox_user_id,
-                                text,
-                            )
-                        else:
-                            username = data.get("name")
-                            display_name = data.get("displayName") or username
-                    else:
-                        log.warning(
-                            "[roblox users] error %s for user %s: %s",
-                            resp.status,
-                            roblox_user_id,
-                            text,
-                        )
-            except aiohttp.ClientError as e:
-                log.warning(
-                    "[roblox users] network error for user %s: %s",
-                    roblox_user_id,
-                    e,
-                )
+        session = self.session
+        if session is None or session.closed:
+            log.warning("[roblox profile] HTTP session is not available.")
+            return username, display_name, avatar_url
 
-            # 2) Get avatar thumbnail
-            thumb_url = (
-                f"{ROBLOX_THUMBNAILS_API}/users/avatar-headshot"
-                f"?userIds={roblox_user_id}&size=150x150&format=Png&isCircular=false"
-            )
-            try:
-                async with session.get(thumb_url, timeout=10) as resp:
-                    text = await resp.text()
-                    if resp.status == 200:
-                        try:
-                            data = await resp.json()
-                        except aiohttp.ContentTypeError:
-                            log.warning(
-                                "[roblox thumbs] non-JSON 200 for user %s: %s",
-                                roblox_user_id,
-                                text,
-                            )
-                        else:
-                            items = data.get("data") or []
-                            if items:
-                                avatar_url = items[0].get("imageUrl")
-                    else:
+        # 1) Get username / display name
+        user_url = f"{ROBLOX_USERS_API}/users/{roblox_user_id}"
+        try:
+            async with session.get(user_url, timeout=10) as resp:
+                text = await resp.text()
+                if resp.status == 200:
+                    try:
+                        data = await resp.json()
+                    except aiohttp.ContentTypeError:
                         log.warning(
-                            "[roblox thumbs] error %s for user %s: %s",
-                            resp.status,
+                            "[roblox users] non-JSON 200 for user %s: %s",
                             roblox_user_id,
                             text,
                         )
-            except aiohttp.ClientError as e:
-                log.warning(
-                    "[roblox thumbs] network error for user %s: %s",
-                    roblox_user_id,
-                    e,
-                )
+                    else:
+                        username = data.get("name")
+                        display_name = data.get("displayName") or username
+                else:
+                    log.warning(
+                        "[roblox users] error %s for user %s: %s",
+                        resp.status,
+                        roblox_user_id,
+                        text,
+                    )
+        except aiohttp.ClientError as e:
+            log.warning(
+                "[roblox users] network error for user %s: %s",
+                roblox_user_id,
+                e,
+            )
+
+        # 2) Get avatar thumbnail
+        thumb_url = (
+            f"{ROBLOX_THUMBNAILS_API}/users/avatar-headshot"
+            f"?userIds={roblox_user_id}&size=150x150&format=Png&isCircular=false"
+        )
+        try:
+            async with session.get(thumb_url, timeout=10) as resp:
+                text = await resp.text()
+                if resp.status == 200:
+                    try:
+                        data = await resp.json()
+                    except aiohttp.ContentTypeError:
+                        log.warning(
+                            "[roblox thumbs] non-JSON 200 for user %s: %s",
+                            roblox_user_id,
+                            text,
+                        )
+                    else:
+                        items = data.get("data") or []
+                        if items:
+                            avatar_url = items[0].get("imageUrl")
+                else:
+                    log.warning(
+                        "[roblox thumbs] error %s for user %s: %s",
+                        resp.status,
+                        roblox_user_id,
+                        text,
+                    )
+        except aiohttp.ClientError as e:
+            log.warning(
+                "[roblox thumbs] network error for user %s: %s",
+                roblox_user_id,
+                e,
+            )
 
         return username, display_name, avatar_url
 
