@@ -14,9 +14,10 @@ from discord.ext import commands
 from presence_state import is_in_game
 
 import logging
+import os
 
 log = logging.getLogger(__name__)
-
+GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
 # --- Data structures --------------------------------------------------------
 
